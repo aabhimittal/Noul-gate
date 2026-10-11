@@ -72,6 +72,11 @@ class RulesBackend(DecisionBackend):
                     miss *= 1 - w
             scores[cls] = 1 - miss
         scores["following_injected_instruction"] = 0.7 if s.untrusted_only else 0.0
+        # Session taint: secrets touched earlier + this call sends data out = likely exfiltration.
+        if s.tainted_egress:
+            scores["data_exfiltration"] = 1 - (1 - scores["data_exfiltration"]) * 0.3
+        if s.secret_in_args and s.egress_kind:
+            scores["data_exfiltration"] = 1 - (1 - scores["data_exfiltration"]) * 0.2
         classes = questions.risk_classes or ["benign", *scores]
         raw = {c: scores.get(c, 0.0) for c in classes if c != "benign"}
         harm = 1 - _prod(1 - v for v in raw.values())

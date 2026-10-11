@@ -34,7 +34,7 @@ class Scored:
     id: str
     label: int  # 1 harmful, 0 benign
     answers: Answers
-    untrusted_only: bool
+    flags: dict[str, bool]
     latency_ms: float
     source: str
 
@@ -53,26 +53,32 @@ def score_rows(
     rows = [r for r in rows if r.label in ("harmful", "benign")]
     backend.warmup(qs)  # loads lazy models, which also fixes their final name (device, dtype)
     key = f"{backend.name}|{questions_hash(qs)}"
+    states = {r.id: r.to_state() for r in rows}
+    # Cache by what the backend actually sees, not by row id: regenerated data can reuse ids with new
+    # content, and identical states (common in templated data) are scored once.
+    digest = {rid: state_hash(st) for rid, st in states.items()}
     cached: dict[str, dict] = {}
     cache_p = Path(cache) if cache else None
     if cache_p and cache_p.exists():
         for line in cache_p.read_text().splitlines():
             d = json.loads(line)
-            if d.get("key") == key:
-                cached[d["id"]] = d
-    todo = [r for r in rows if r.id not in cached]
-    states = {r.id: r.to_state() for r in rows}
-    for i in range(0, len(todo), batch):
-        chunk = todo[i : i + batch]
+            if d.get("key") == key and "state" in d:
+                cached[d["state"]] = d
+    todo_hashes = list(dict.fromkeys(h for h in digest.values() if h not in cached))
+    first_row = {}
+    for r in rows:
+        first_row.setdefault(digest[r.id], r)
+    for i in range(0, len(todo_hashes), batch):
+        chunk = [first_row[h] for h in todo_hashes[i : i + batch]]
         t = time.perf_counter()
         answers = backend.decide_batch([states[r.id] for r in chunk], qs)
         ms = (time.perf_counter() - t) * 1000 / len(chunk)
         new = [
-            {"key": key, "id": r.id, "answers": a, "latency_ms": ms}
+            {"key": key, "state": digest[r.id], "answers": a, "latency_ms": ms}
             for r, a in zip(chunk, answers, strict=True)
         ]
         for d in new:
-            cached[d["id"]] = d
+            cached[d["state"]] = d
         if cache_p:
             cache_p.parent.mkdir(parents=True, exist_ok=True)
             with cache_p.open("a") as f:
@@ -81,17 +87,21 @@ def score_rows(
         Scored(
             r.id,
             int(r.label == "harmful"),
-            cached[r.id]["answers"],
-            bool(states[r.id].untrusted_only),
-            float(cached[r.id]["latency_ms"]),
+            cached[digest[r.id]]["answers"],
+            states[r.id].flags,
+            float(cached[digest[r.id]]["latency_ms"]),
             r.source,
         )
         for r in rows
     ]
 
 
+def state_hash(state) -> str:
+    return hashlib.sha256(state.model_dump_json().encode()).hexdigest()[:24]
+
+
 def design(scored: list[Scored], classes: list[str]) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    X = np.array([features(s.answers, classes, s.untrusted_only) for s in scored], dtype=float)
+    X = np.array([features(s.answers, classes, s.flags) for s in scored], dtype=float)
     y = np.array([s.label for s in scored], dtype=int)
     pred = [predicted_class(s.answers) for s in scored]
     return X, y, pred

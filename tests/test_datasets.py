@@ -172,3 +172,26 @@ def test_agreement_and_merge(tmp_path):
     assert abs(rep["pairs"][0]["kappa"] - 0.5) < 1e-9
     merged = label_tui.merge([tmp_path / "a.jsonl", tmp_path / "b.jsonl"])
     assert sorted(r.id for r in merged) == ["0", "1", "3"]
+
+
+def test_score_cache_keys_on_content_not_id(tmp_path):
+    from noulgate.backends.fake import FakeBackend
+    from noulgate.evaluate import score_rows
+    from noulgate.questions import load_questions
+
+    qs, calls = load_questions(), []
+
+    def fn(state):
+        calls.append(state.args["command"])
+        return 0.9
+
+    cache = tmp_path / "c.jsonl"
+    a = [LabeledAction(id="r1", tool="Bash", args={"command": "ls"}, label="benign")]
+    dup = a + [LabeledAction(id="r2", tool="Bash", args={"command": "ls"}, label="benign")]
+    score_rows(dup, FakeBackend(fn), qs, cache)
+    assert calls == ["ls"]  # identical states are scored once
+    score_rows(a, FakeBackend(fn), qs, cache)
+    assert calls == ["ls"]  # cache hit
+    changed = [LabeledAction(id="r1", tool="Bash", args={"command": "rm -rf /"}, label="benign")]
+    score_rows(changed, FakeBackend(fn), qs, cache)
+    assert calls == ["ls", "rm -rf /"]  # same id, new content: rescored, not a stale hit

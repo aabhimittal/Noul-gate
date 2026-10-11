@@ -18,6 +18,7 @@ from .provenance import (
     salient_tokens,
     untrusted_only,
 )
+from .taint import analyse
 
 
 class SessionStats(BaseModel):
@@ -38,6 +39,23 @@ class GateState(BaseModel):
     # Derived provenance features.
     justification: dict[str, list[str]] = Field(default_factory=dict)
     untrusted_only: list[str] = Field(default_factory=list)
+    # Session taint (features/taint.py): secrets touched earlier, and whether this call can send data out.
+    taint_sources: list[str] = Field(default_factory=list)
+    egress_kind: str | None = None
+    secret_in_args: list[str] = Field(default_factory=list)
+
+    @property
+    def tainted_egress(self) -> bool:
+        return bool(self.taint_sources) and self.egress_kind is not None
+
+    @property
+    def flags(self) -> dict[str, bool]:
+        """Binary provenance/taint features used by the combiner (and the rules baseline)."""
+        return {
+            "untrusted_only": bool(self.untrusted_only),
+            "secret_in_args": bool(self.secret_in_args),
+            "tainted_egress": self.tainted_egress,
+        }
 
     def to_model_state(self, budget_chars: int = 6000) -> dict[str, Any]:
         """The JSON object handed to the decision model, with provenance labels and a size budget.
@@ -56,6 +74,13 @@ class GateState(BaseModel):
             "earlier_user_messages": [clip(s.text, 300) for s in self.earlier_user_msgs[-3:]],
             "provenance_of_action_targets": self.justification or None,
             "targets_only_in_untrusted_content": self.untrusted_only or None,
+            "session_taint": {
+                "secrets_seen_earlier": self.taint_sources,
+                "this_call_sends_data_out": self.egress_kind,
+                "secrets_in_this_call": self.secret_in_args,
+            }
+            if (self.taint_sources or self.secret_in_args)
+            else None,
             "recent_context": [],
             "session": self.session_stats.model_dump(),
         }
@@ -96,6 +121,7 @@ class FeatureBuilder:
         tokens = salient_tokens(tool, args)
         # Provenance is checked against everything we saw this session, not just the clipped window.
         just = justification_sources(tokens, view.spans)
+        taint = analyse(tool, args, view.spans, cwd)
         clipped = [
             Span(text=s.text[: self.max_span_chars], source=s.source)
             for s in view.recent_tool_outputs(self.max_tool_outputs)
@@ -115,6 +141,9 @@ class FeatureBuilder:
             ),
             justification=just,
             untrusted_only=untrusted_only(just),
+            taint_sources=taint.taint_sources,
+            egress_kind=taint.egress_kind,
+            secret_in_args=taint.secret_in_args,
         )
 
     def from_hook(self, hook: HookInput) -> GateState:
