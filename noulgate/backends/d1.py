@@ -18,6 +18,15 @@ MODEL_ID = "LiquidAI/d1-3B"
 PINNED_REVISION = "051bcc464b01b9f92942b364d9586b0ef5912432"
 
 
+def _cpu_has_bf16() -> bool:
+    """AVX512-BF16 / AMX CPUs run d1 in bfloat16 ~20x faster than float32 (measured: 1.25 s vs 29 s)."""
+    try:
+        flags = open("/proc/cpuinfo").read()
+    except OSError:
+        return False
+    return "avx512_bf16" in flags or "amx_bf16" in flags
+
+
 class D1Backend(DecisionBackend):
     name = "d1-3b"
 
@@ -35,7 +44,7 @@ class D1Backend(DecisionBackend):
         self.device = device
         self.compile = compile
         self.budget_chars = budget_chars
-        # float32 on CPU per the model card; bfloat16 is much faster on CPUs with AMX/AVX512-BF16.
+        # The model card uses float32 on CPU. We default to bfloat16 where the CPU supports it natively.
         # Calibrate with the same dtype you deploy: answers shift slightly between precisions.
         self.dtype = dtype or os.environ.get("NOULGATE_D1_DTYPE")
         self._model = None
@@ -51,7 +60,7 @@ class D1Backend(DecisionBackend):
         device = self.device or (
             "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         )
-        name = self.dtype or ("float32" if device == "cpu" else "bfloat16")
+        name = self.dtype or ("bfloat16" if device != "cpu" or _cpu_has_bf16() else "float32")
         dtype = getattr(torch, name)
         model = AutoModel.from_pretrained(
             self.model_id, trust_remote_code=True, dtype=dtype, revision=self.revision

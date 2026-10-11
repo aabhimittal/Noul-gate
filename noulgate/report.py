@@ -85,7 +85,7 @@ def benchmark_report(
     for i, (name, res) in enumerate(results.items()):
         pa = sorted(res["per_alpha"].values(), key=lambda d: d["alpha"])
         lat = latency.get(name, {})
-        lab = f"{name} (p50 {lat.get('p50_ms', float('nan')):.1f} ms)" if lat else name
+        lab = f"{name} (p50 {lat.get('p50_ms', float('nan')):.3g} ms)" if lat else name
         c = PALETTE[i % len(PALETTE)]
         ax.plot(
             [d["ask_rate_mean"] for d in pa], [d["false_allow_mean"] for d in pa], "o-", color=c, label=lab

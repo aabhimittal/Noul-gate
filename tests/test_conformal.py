@@ -125,3 +125,21 @@ def test_calibrate_never_violates_on_calibration_set(seed):
     pol = calibrate(p, y, pred, alpha=0.1, beta=0.1, combiner=Combiner(CLASSES), per_class=False)
     s = pol.calibration_stats
     assert s["false_allow"] <= 0.1 + 1e-12 and s["false_deny"] <= 0.1 + 1e-12
+
+
+def test_ask_rate_monotone_in_alpha_with_per_class_cells():
+    """Regression: the cell partition must not change with α (it once did, making ask non-monotone)."""
+    rng = np.random.default_rng(3)
+    n = 3000
+    y = (rng.random(n) < 0.4).astype(int)
+    p = np.where(y == 1, rng.beta(4, 2, n), rng.beta(2, 4, n))
+    pred = rng.choice(["benign", "destructive", "data_exfiltration"], size=n).tolist()
+    asks, allows_h, partitions = [], [], []
+    for a in [0.005, 0.01, 0.02, 0.05, 0.1, 0.2]:
+        pol = calibrate(p, y, pred, alpha=a, beta=0.1, combiner=Combiner(CLASSES), min_n=50)
+        partitions.append(sorted(pol.group_of.items()))
+        asks.append(pol.calibration_stats["ask_rate"])
+        allows_h.append(pol.calibration_stats["false_allow"])
+    assert all(part == partitions[0] for part in partitions)
+    assert all(x >= y_ - 1e-12 for x, y_ in zip(asks, asks[1:], strict=False)), asks
+    assert all(x <= y_ + 1e-12 for x, y_ in zip(allows_h, allows_h[1:], strict=False)), allows_h

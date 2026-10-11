@@ -1,0 +1,22 @@
+{
+  "dtype": "bfloat16",
+  "short": {
+    "runs": 12,
+    "p50_ms": 1252,
+    "p99_ms": 1304,
+    "max_ms": 1306,
+    "state_chars": 202
+  },
+  "with_context": {
+    "runs": 2,
+    "p50_ms": 5719,
+    "p99_ms": 6001,
+    "max_ms": 6007,
+    "state_chars": 5455
+  },
+  "throughput_per_s": 0.821,
+  "batch": 8,
+  "backend": "d1-3b[cpu,bfloat16]",
+  "machine": "4 vCPU Intel Xeon @ 2.10GHz (AMX-BF16), 15 GB RAM, no GPU",
+  "note": "warm calls, 3 questions in one pass, transformers 5.19 / torch 2.14 cpu"
+}

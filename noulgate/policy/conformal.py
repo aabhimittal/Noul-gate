@@ -7,12 +7,18 @@ marginally over the draw of the calibration set. Ties only make the strict inequ
 
 The deny side mirrors it on benign scores: deny iff p(x) > λ_deny, the k_b-th largest benign score with
 k_b = ⌊β(n_b + 1)⌋, so the false-deny rate among benign actions is at most β. Everything else is "ask".
-When the two regions overlap (λ_deny < λ_allow) the overlap becomes "ask", which keeps both bounds.
+When the two regions overlap (λ_deny < λ_allow) no action needs a human: any single cut-point in
+[λ_deny, λ_allow] keeps both bounds. We cut at λ_allow, so α remains the knob the user tunes (cutting
+at λ_deny instead pins false-allow near 0 and false-deny near β for every α, which makes α meaningless).
+The spec leaves this case open; sending the overlap to "ask" made the ask rate grow with α.
 
 Thresholds can be set per predicted risk class (Mondrian conformal): each cell gets its own λ pair and
-its own guarantee conditional on the predicted class. Classes with too few calibration examples share
-one pooled cell. Choosing cells from calibration counts is mildly data-dependent; fix the cells in
-advance (``groups=``) if you need the textbook guarantee.
+its own guarantee conditional on the predicted class. Classes with fewer than ``min_n`` harmful or
+benign calibration examples share one pooled cell. ``min_n`` is fixed (default 50) and does not depend
+on α: if it did, changing α would change the partition and the ask rate would stop being monotone in α
+(observed during development: tiny cells of 9 examples gave noisy thresholds). Choosing cells from
+calibration counts is still mildly data-dependent; fix the cells in advance (``groups=``) if you need
+the textbook guarantee.
 
 What this is not: conditional on the action, robust to distribution shift, or robust to an attacker
 who adapts to the gate. Treat α as a monitoring target and recalibrate on fresh attack data.
@@ -33,6 +39,7 @@ from ..schema import Decision
 from .combiner import Combiner
 
 POOLED = "_pooled"
+DEFAULT_MIN_CELL = 50  # harmful and benign calibration examples needed before a class gets its own cell
 
 
 def k_index(alpha: float, n: int) -> int:
@@ -59,6 +66,11 @@ def min_n_for(alpha: float) -> int:
 
 
 def decide(p: float, lam_allow: float, lam_deny: float) -> Decision:
+    if lam_deny < lam_allow:
+        # Overlap: one cut anywhere in [λ_deny, λ_allow] keeps both bounds (allow ⊆ {p < λ_allow},
+        # deny ⊆ {p > λ_deny}), so nobody needs to be asked. Cut at λ_allow so that α stays the
+        # operating point: false allows up to the chosen α, and the fewest false denies.
+        return Decision.ALLOW if p < lam_allow else Decision.DENY
     if p < lam_allow and p <= lam_deny:
         return Decision.ALLOW
     if p > lam_deny and p >= lam_allow:
@@ -196,15 +208,14 @@ def calibrate(
     beta: float,
     combiner: Combiner,
     per_class: bool = True,
-    min_n: int | None = None,
+    min_n: int = DEFAULT_MIN_CELL,
     groups: dict[str, str] | None = None,
 ) -> ConformalPolicy:
     """Compute λ_allow / λ_deny per cell from calibration scores (labels: 1 = harmful, 0 = benign)."""
     scores = np.asarray(scores, dtype=float)
     labels = np.asarray(labels, dtype=int)
     predicted = list(predicted)
-    min_h = min_n or min_n_for(alpha)
-    min_b = min_n or min_n_for(beta)
+    min_h = min_b = min_n  # independent of α and β so the partition is the same for every α
     if groups is not None:
         group_of = dict(groups)
     elif per_class:

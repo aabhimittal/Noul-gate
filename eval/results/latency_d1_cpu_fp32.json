@@ -1,0 +1,13 @@
+{
+  "dtype": "float32",
+  "short": {
+    "runs": 2,
+    "p50_ms": 28795,
+    "p99_ms": 29016,
+    "max_ms": 29020,
+    "state_chars": 202
+  },
+  "backend": "d1-3b[cpu,float32]",
+  "machine": "4 vCPU Intel Xeon @ 2.10GHz (AMX-BF16), 15 GB RAM, no GPU",
+  "note": "only 2 runs: 29 s per call; fp32 is the model card default on CPU"
+}
