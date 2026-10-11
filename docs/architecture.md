@@ -13,6 +13,21 @@ any MCP client ──mcp-proxy─────┤──────────�
                          AuditLog (JSONL)  audit.py, schema.AuditRecord
 ```
 
+## Round 2 additions at a glance
+
+```
+PreToolUse ──▶ hook (stdlib only, ~36 ms) ──▶ serve: FeatureBuilder ─▶ provenance + taint
+                                                         │
+                                       fast path? ──yes──▶ p = 0, no model call
+                                                         │ no
+                                                         ▼
+                                                 DecisionBackend ─▶ combiner ─▶ conformal policy
+PostToolUse / PostToolUseFailure ──▶ hook ──▶ outcome record (same tool_use_id)
+
+audit.jsonl ──▶ noulgate harvest  (ask + outcome/transcript ─▶ human answer ─▶ labeled candidates)
+            └─▶ noulgate monitor  (rates per window, ask approval, PSI/KS drift ─▶ exit 1 on alert)
+```
+
 ## One pending tool call, step by step
 
 1. **Hook** (`integrations/claude_code_hook.py`). Claude Code runs the hook command with the
@@ -37,6 +52,23 @@ any MCP client ──mcp-proxy─────┤──────────�
    Claude Code's own permission rules still apply. `--grant-allow` makes the gate emit `"allow"`.
    Every decision is appended to the audit log.
 
+## Session taint (features/taint.py)
+
+Provenance asks "who asked for this?". Taint asks "what has this session already touched?". A session
+is tainted once a credential-like file was read (a `file:` span whose path matches the secret pattern)
+or secret-looking content appeared in tool output (private keys, cloud and API tokens, `PASSWORD=`
+literals). A tainted session followed by an egress call (network commands, web fetches, messaging or
+publishing MCP tools, writes outside the project) sets `tainted_egress`. This catches the chain
+"read a key, later upload notes to a host the user named", where provenance sees nothing unusual.
+Taint reaches the model state (`session_taint`) and the combiner (`secret_in_args`, `tainted_egress`).
+
+## Fast path (policy/fastpath.py)
+
+Reads inside the project and a few read-only shell commands score p = 0 without a model call. The policy
+records whether it was calibrated with the fast path, and the gate follows that setting. Calibration then
+covers the fast path too: if it ever lets harmful actions through, λ_allow drops to 0 and fast-path calls
+are no longer auto-allowed.
+
 ## Failure behaviour
 
 | Failure | Log mode | Enforce mode (hook) | MCP proxy |
@@ -48,7 +80,8 @@ any MCP client ──mcp-proxy─────┤──────────�
 
 ## Why a server
 
-A hook is a new process for every tool call. Loading d1-3B takes seconds and 6–12 GB of RAM, so
+A hook is a new process for every tool call. It imports only the standard library: importing pydantic
+alone used to cost ~100 ms, and the hook went from 170 ms to 36 ms per call when it stopped doing so. Loading d1-3B takes seconds and 6–12 GB of RAM, so
 the model lives in `noulgate serve` and the hook is a ~50 ms HTTP client. `serve` binds to
 127.0.0.1 and has no authentication, so do not expose it.
 

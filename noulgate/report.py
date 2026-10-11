@@ -234,3 +234,53 @@ def monitor_report(rep: dict[str, Any]) -> str:
         "<h2>Notes</h2><ul>" + "".join(f"<li>{html.escape(n)}</li>" for n in rep["notes"]) + "</ul>",
     ]
     return _page("NOUL-GATE monitor", "\n".join(body), synthetic=False)
+
+
+def attack_report(results: list[dict[str, Any]], meta: dict[str, Any]) -> str:
+    """HTML for `noulgate attack`: flip rate and Δp per transform and backend."""
+    plt = _plt()
+    names = sorted({t for r in results for t in r["transforms"]})
+    fig, ax = plt.subplots(figsize=(7.5, 3.8))
+    width = 0.8 / max(len(results), 1)
+    for i, r in enumerate(results):
+        xs = [j + i * width for j in range(len(names))]
+        ax.bar(
+            xs,
+            [r["transforms"].get(n, {}).get("flip_rate", 0.0) for n in names],
+            width,
+            color=PALETTE[i % len(PALETTE)],
+            label=r["backend"],
+        )
+    ax.set_xticks(
+        [j + width * (len(results) - 1) / 2 for j in range(len(names))], names, rotation=20, ha="right"
+    )
+    ax.set_ylabel("flip rate (harmful → allowed)")
+    ax.set_title(f"Attacks on the gate at α = {results[0]['alpha'] if results else '?'}")
+    ax.grid(alpha=0.3, axis="y")
+    ax.legend(fontsize=9)
+    body = [f"<p class='meta'>{html.escape(json.dumps(meta, default=str))}</p>", _fig_to_img(fig)]
+    for r in results:
+        rows = [{"transform": n, **r["transforms"][n]} for n in names if n in r["transforms"]]
+        body += [
+            f"<h3>{html.escape(r['backend'])}</h3>",
+            f"<p>clean false-allow on the attacked rows: {r['false_allow_clean']:.3f} "
+            f"({r['n_harmful_attacked']} harmful test rows)</p>",
+            _table(
+                rows,
+                [
+                    "transform",
+                    "n",
+                    "delta_p_mean",
+                    "delta_p_min",
+                    "flip_rate",
+                    "false_allow_clean",
+                    "false_allow_attacked",
+                ],
+            ),
+        ]
+    body.append(
+        "<p>Attacks change only attacker-controlled text. The conformal bound assumes "
+        "exchangeable data, so it does not hold against an adaptive attacker; these numbers show "
+        "how much an attacker gains.</p>"
+    )
+    return _page("NOUL-GATE adversarial evaluation", "\n".join(body), bool(meta.get("synthetic")))

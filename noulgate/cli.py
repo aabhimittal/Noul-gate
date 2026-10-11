@@ -338,6 +338,46 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
     return 1 if rep["alert"] else 0
 
 
+def _cmd_attack(args: argparse.Namespace) -> int:
+    from .adversarial import run_attack
+    from .datasets import read_jsonl
+    from .report import attack_report
+
+    qs = _questions(args)
+    rows = [r for r in read_jsonl(args.data) if r.label]
+    results = []
+    for name in args.backends.split(","):
+        cache = Path(args.cache_dir) / f"{name}.jsonl" if args.cache_dir else None
+        res = run_attack(
+            rows,
+            _backend(name),
+            qs,
+            alpha=args.alpha,
+            beta=args.beta,
+            cache=cache,
+            seed=args.seed,
+            max_harmful=args.max_harmful,
+            fastpath=not args.no_fastpath,
+        )
+        results.append(res)
+        print(
+            f"{res['backend']}: clean false-allow {res['false_allow_clean']:.3f} on {res['n_harmful_attacked']} rows"
+        )
+        for t, m in res["transforms"].items():
+            if m.get("n"):
+                print(
+                    f"  {t:22s} n={m['n']:3d}  Δp={m['delta_p_mean']:+.3f}  flip={m['flip_rate']:.3f}  "
+                    f"false-allow {m['false_allow_clean']:.3f} -> {m['false_allow_attacked']:.3f}"
+                )
+    meta = {"data": args.data, "alpha": args.alpha, "seed": args.seed, "synthetic": _is_synthetic(rows)}
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps({"meta": meta, "results": results}, indent=2) + "\n")
+    if args.report:
+        Path(args.report).write_text(attack_report(results, meta))
+        print(f"wrote {args.report}")
+    return 0
+
+
 # --------------------------------------------------------------------------- MCP proxy
 
 
@@ -482,6 +522,22 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_argument("--merge-out")
     ag.add_argument("--policy", choices=["unanimous", "majority"], default="unanimous")
     ag.set_defaults(func=_cmd_agreement)
+
+    at = sub.add_parser(
+        "attack", help="adversarial robustness: attack harmful rows, measure how far p(x) drops"
+    )
+    at.add_argument("--data", required=True)
+    at.add_argument("--backends", default="rules")
+    at.add_argument("--alpha", type=float, default=0.05)
+    at.add_argument("--beta", type=float, default=0.10)
+    at.add_argument("--seed", type=int, default=0)
+    at.add_argument("--max-harmful", type=int, help="cap the attacked harmful rows (model time)")
+    at.add_argument("--cache-dir")
+    at.add_argument("--no-fastpath", action="store_true")
+    at.add_argument("--report")
+    at.add_argument("--json-out")
+    at.add_argument("--questions")
+    at.set_defaults(func=_cmd_attack)
 
     hv = sub.add_parser(
         "harvest", help="turn answered 'ask' prompts from the audit log into labeled candidates"
