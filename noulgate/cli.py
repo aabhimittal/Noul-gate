@@ -51,7 +51,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
             extra += ["--server", args.server]
         if args.grant_allow:
             extra += ["--grant-allow"]
-    entry = None if args.uninstall else install.hook_entry(args.mode, extra)
+    entry = None if args.uninstall else install.hook_entries(args.mode, extra, outcomes=not args.no_outcomes)
     install.install(path, entry, yes=args.yes)
     return 0
 
@@ -281,6 +281,53 @@ def _cmd_agreement(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- feedback / monitoring
+
+
+def _cmd_harvest(args: argparse.Namespace) -> int:
+    from .datasets import write_jsonl
+    from .feedback import harvest, read_records, summary, to_labeled
+
+    asks = harvest(read_records(args.log))
+    print(f"asks: {summary(asks)}")
+    rows = to_labeled(asks, auto_label=args.auto_label)
+    if args.out:
+        n = write_jsonl(args.out, rows)
+        labeled = sum(r.label is not None for r in rows)
+        print(f"wrote {n} rows ({labeled} labeled) to {args.out}; review them with `noulgate label`")
+    return 0
+
+
+def _cmd_monitor(args: argparse.Namespace) -> int:
+    from .feedback import read_records
+    from .monitor import monitor
+
+    policy = json.loads(Path(args.policy).read_text()) if args.policy else None
+    rep = monitor(read_records(args.log), policy, window=args.window, policy_id=args.policy_id).to_dict()
+    o = rep["overall"]
+    print(
+        f"{rep['n_decisions']} decisions: allow {o['allow_rate']:.3f}  ask {o['ask_rate']:.3f}  "
+        f"deny {o['deny_rate']:.3f}"
+    )
+    print(f"asks answered: {rep['asks']}  approval rate: {rep['ask_approval_rate']}")
+    print(
+        "drift: "
+        + ", ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in rep["drift"].items())
+    )
+    for a in rep["alerts"]:
+        print(f"ALERT: {a}")
+    for n in rep["notes"]:
+        print(f"note: {n}")
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(rep, indent=2, default=str) + "\n")
+    if args.report:
+        from .report import monitor_report
+
+        Path(args.report).write_text(monitor_report(rep))
+        print(f"wrote {args.report}")
+    return 1 if rep["alert"] else 0
+
+
 # --------------------------------------------------------------------------- MCP proxy
 
 
@@ -327,6 +374,11 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--server")
     i.add_argument("--grant-allow", action="store_true")
     i.add_argument("--uninstall", action="store_true")
+    i.add_argument(
+        "--no-outcomes",
+        action="store_true",
+        help="don't install the PostToolUse/PostToolUseFailure outcome hooks (used by `harvest`)",
+    )
     i.add_argument("-y", "--yes", action="store_true", help="write without asking")
     i.set_defaults(func=_cmd_install)
 
@@ -416,6 +468,27 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_argument("--merge-out")
     ag.add_argument("--policy", choices=["unanimous", "majority"], default="unanimous")
     ag.set_defaults(func=_cmd_agreement)
+
+    hv = sub.add_parser(
+        "harvest", help="turn answered 'ask' prompts from the audit log into labeled candidates"
+    )
+    hv.add_argument("--log", default=str(Path.home() / ".noulgate" / "audit.jsonl"))
+    hv.add_argument("--out", help="write LabeledAction JSONL here")
+    hv.add_argument(
+        "--auto-label",
+        action="store_true",
+        help="approved -> benign, rejected -> harmful (otherwise answers are only hints)",
+    )
+    hv.set_defaults(func=_cmd_harvest)
+
+    mo = sub.add_parser("monitor", help="decision rates, ask outcomes and score drift; exit 1 on alert")
+    mo.add_argument("--log", default=str(Path.home() / ".noulgate" / "audit.jsonl"))
+    mo.add_argument("--policy", help="policy.json (enables drift checks and calibration comparisons)")
+    mo.add_argument("--policy-id", help="only decisions made by this policy (default: the --policy's id)")
+    mo.add_argument("--window", default="1d", help="bucket size: 30m, 6h, 1d ...")
+    mo.add_argument("--report")
+    mo.add_argument("--json-out")
+    mo.set_defaults(func=_cmd_monitor)
 
     m = sub.add_parser("mcp-proxy", help="gate every tools/call of an upstream stdio MCP server")
     m.add_argument("--server", help="use a running `noulgate serve` at this URL")

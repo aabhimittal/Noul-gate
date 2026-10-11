@@ -239,6 +239,16 @@ def calibrate(
     policy.calibration_stats = rates(decisions, labels)
     policy.calibration_stats["n_h"] = int(labels.sum())
     policy.calibration_stats["n_b"] = int(len(labels) - labels.sum())
+    # Reference score distributions for drift monitoring (`noulgate monitor`).
+    policy.calibration_stats["score_reference"] = {
+        name: score_quantiles(scores[mask])
+        for name, mask in (
+            ("all", np.ones(len(scores), bool)),
+            ("benign", labels == 0),
+            ("harmful", labels == 1),
+        )
+        if mask.any()
+    }
     warnings = [
         f"cell {k}: n_h={c.n_h} < {min_n_for(alpha)} so k=0 and nothing is allowed"
         for k, c in cells.items()
@@ -247,6 +257,15 @@ def calibrate(
     if warnings:
         policy.calibration_stats["warnings"] = warnings
     return policy
+
+
+REFERENCE_QUANTILES = 21  # 0%, 5%, ..., 100%
+
+
+def score_quantiles(scores) -> list[float]:
+    return [
+        float(q) for q in np.quantile(np.asarray(scores, dtype=float), np.linspace(0, 1, REFERENCE_QUANTILES))
+    ]
 
 
 def rates(decisions: list[Decision], labels) -> dict[str, float]:

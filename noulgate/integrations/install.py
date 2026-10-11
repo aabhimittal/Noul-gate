@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any
 
 MARKER = "noulgate"
+HOOK_MODULE = "noulgate.integrations.claude_code_hook"
 
 
 def hook_command(mode: str, extra: list[str] | None = None) -> str:
     # Absolute interpreter path: the hook runs from Claude Code's environment, not this venv.
-    parts = [sys.executable, "-m", "noulgate.cli", "hook", "claude-code", "--mode", mode, *(extra or [])]
+    # The hook module directly, not `noulgate.cli`: skipping argparse saves ~13 ms per tool call.
+    parts = [sys.executable, "-m", HOOK_MODULE, "--mode", mode, *(extra or [])]
     return shlex.join(parts)
 
 
@@ -38,26 +40,71 @@ def settings_path(scope: str, project_dir: Path | None = None) -> Path:
 
 
 def _is_ours(hook: dict[str, Any]) -> bool:
-    return MARKER in str(hook.get("command", "")) and "hook claude-code" in str(hook.get("command", ""))
+    cmd = str(hook.get("command", ""))
+    return MARKER in cmd and ("hook claude-code" in cmd or HOOK_MODULE in cmd)  # old and new command forms
 
 
-def merge(settings: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy with exactly one noulgate PreToolUse hook (replacing any previous one)."""
+OUTCOME_EVENTS = ("PostToolUse", "PostToolUseFailure")
+EVENTS = ("PreToolUse", *OUTCOME_EVENTS)
+
+
+def hook_entries(
+    mode: str, extra: list[str] | None = None, outcomes: bool = True
+) -> dict[str, dict[str, Any]]:
+    """The hooks to install, per event. Outcome hooks only log (they can't block: the tool already ran),
+    so they always run in log mode with a short timeout and fail open."""
+    entries = {"PreToolUse": hook_entry(mode, extra)}
+    if outcomes:
+        log_extra = [a for a in (extra or []) if a != "--grant-allow"]
+        log_extra = _drop_flag(log_extra, "--server")
+        for event in OUTCOME_EVENTS:
+            entries[event] = {"type": "command", "command": hook_command("log", log_extra), "timeout": 5}
+    return entries
+
+
+def _drop_flag(args: list[str], flag: str) -> list[str]:
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a == flag:
+            skip = True
+        else:
+            out.append(a)
+    return out
+
+
+def _strip_ours(settings: dict[str, Any]) -> None:
+    hooks = settings.get("hooks", {})
+    for event in list(hooks):
+        groups = hooks[event]
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            group["hooks"] = [h for h in group.get("hooks", []) if not _is_ours(h)]
+        groups[:] = [g for g in groups if g.get("hooks")]
+        if not groups and event in EVENTS:
+            del hooks[event]
+
+
+def merge(settings: dict[str, Any], entries: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy with exactly one noulgate hook per event in `entries` (replacing any previous ones).
+
+    `entries` maps event name -> hook entry; a bare entry (with a "type" key) means PreToolUse only.
+    """
+    if "type" in entries:
+        entries = {"PreToolUse": entries}
     out = copy.deepcopy(settings)
-    groups = out.setdefault("hooks", {}).setdefault("PreToolUse", [])
-    for group in groups:
-        group["hooks"] = [h for h in group.get("hooks", []) if not _is_ours(h)]
-    groups[:] = [g for g in groups if g.get("hooks")]
-    groups.append({"matcher": "*", "hooks": [entry]})
+    _strip_ours(out)
+    hooks = out.setdefault("hooks", {})
+    for event, entry in entries.items():
+        hooks.setdefault(event, []).append({"matcher": "*", "hooks": [entry]})
     return out
 
 
 def uninstall(settings: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(settings)
-    groups = out.get("hooks", {}).get("PreToolUse", [])
-    for group in groups:
-        group["hooks"] = [h for h in group.get("hooks", []) if not _is_ours(h)]
-    groups[:] = [g for g in groups if g.get("hooks")]
+    _strip_ours(out)
     return out
 
 
@@ -70,7 +117,8 @@ def diff(old: str, new: str, path: Path) -> str:
 
 
 def install(path: Path, entry: dict[str, Any] | None, *, yes: bool, out=sys.stdout, inp=sys.stdin) -> bool:
-    """Show the diff, ask, write. `entry=None` uninstalls. Returns True if the file was written."""
+    """Show the diff, ask, write. `entry` is a hook entry or an {event: entry} map; None uninstalls.
+    Returns True if the file was written."""
     old_text = path.read_text() if path.exists() else ""
     current = json.loads(old_text) if old_text.strip() else {}
     new = merge(current, entry) if entry else uninstall(current)

@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-AUDIT_SCHEMA_VERSION = 1
+AUDIT_SCHEMA_VERSION = 2  # v2 added kind, hook_event, outcome, transcript_path
 
 
 class Decision(StrEnum):
@@ -44,10 +44,13 @@ class AuditRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = AUDIT_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = AUDIT_SCHEMA_VERSION
     event_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    # "decision": a pending call (PreToolUse). "outcome": what happened after it (PostToolUse[Failure]).
+    kind: Literal["decision", "outcome"] = "decision"
     source: Literal["claude_code_hook", "mcp_proxy", "serve"] = "claude_code_hook"
+    hook_event: str | None = None
     mode: Literal["log", "enforce"] = "log"
     session_id: str | None = None
     tool_use_id: str | None = None
@@ -57,9 +60,11 @@ class AuditRecord(BaseModel):
     cwd: str | None = None
     permission_mode: str | None = None
     agent_id: str | None = None
+    transcript_path: str | None = None
     # Gate output. All null in log mode (M0): the gate observed but did not decide.
     decision: Decision | None = None
     emitted: Literal["none", "allow", "ask", "deny"] = "none"
+    outcome: Literal["ran", "failed"] | None = None
     p_harm: float | None = Field(default=None, ge=0.0, le=1.0)
     risk_class: str | None = None
     answers: dict[str, Any] | None = None

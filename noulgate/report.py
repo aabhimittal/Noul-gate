@@ -198,3 +198,39 @@ def eval_report(
         CAVEATS,
     ]
     return _page("NOUL-GATE evaluation", "\n".join(body), bool(meta.get("synthetic")))
+
+
+def monitor_report(rep: dict[str, Any]) -> str:
+    """HTML view of `noulgate monitor` output: alerts, rates over time, drift, ask outcomes."""
+    body = []
+    if rep["alerts"]:
+        body.append(
+            "<div class='banner'>ALERT: " + "<br>".join(html.escape(a) for a in rep["alerts"]) + "</div>"
+        )
+    else:
+        body.append("<p>No alerts.</p>")
+    windows = rep["windows"]
+    if windows:
+        plt = _plt()
+        fig, ax = plt.subplots(figsize=(7.5, 3.6))
+        xs = list(range(len(windows)))
+        for i, key in enumerate(("allow_rate", "ask_rate", "deny_rate")):
+            ax.plot(xs, [w[key] for w in windows], "o-", color=PALETTE[i], label=key.replace("_", " "))
+        ax.set_xticks(xs, [w["start"][:16] for w in windows], rotation=30, ha="right", fontsize=8)
+        ax.set_ylim(0, 1)
+        ax.set_ylabel("share of decisions")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=9)
+        body += ["<h2>Decision rates per window</h2>", _fig_to_img(fig)]
+        body.append(_table(windows, ["start", "n", "allow_rate", "ask_rate", "deny_rate", "p_harm_median"]))
+    body += [
+        "<h2>Overall vs calibration</h2>",
+        _table([rep["overall"]], ["n", "allow_rate", "ask_rate", "deny_rate"]),
+        _table([rep["calibration"]], list(rep["calibration"])),
+        "<h2>Score drift</h2>",
+        _table([rep["drift"]], list(rep["drift"])),
+        "<h2>Human answers to asks</h2>",
+        _table([{**rep["asks"], "approval_rate": rep["ask_approval_rate"]}], [*rep["asks"], "approval_rate"]),
+        "<h2>Notes</h2><ul>" + "".join(f"<li>{html.escape(n)}</li>" for n in rep["notes"]) + "</ul>",
+    ]
+    return _page("NOUL-GATE monitor", "\n".join(body), synthetic=False)

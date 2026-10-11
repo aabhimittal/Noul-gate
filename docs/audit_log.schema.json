@@ -14,8 +14,11 @@
   "description": "One line of the JSONL audit log. Every pending tool call produces exactly one record.",
   "properties": {
     "schema_version": {
-      "const": 1,
-      "default": 1,
+      "default": 2,
+      "enum": [
+        1,
+        2
+      ],
       "title": "Schema Version",
       "type": "integer"
     },
@@ -28,6 +31,15 @@
       "title": "Ts",
       "type": "string"
     },
+    "kind": {
+      "default": "decision",
+      "enum": [
+        "decision",
+        "outcome"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
     "source": {
       "default": "claude_code_hook",
       "enum": [
@@ -37,6 +49,18 @@
       ],
       "title": "Source",
       "type": "string"
+    },
+    "hook_event": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hook Event"
     },
     "mode": {
       "default": "log",
@@ -121,6 +145,18 @@
       "default": null,
       "title": "Agent Id"
     },
+    "transcript_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Transcript Path"
+    },
     "decision": {
       "anyOf": [
         {
@@ -142,6 +178,22 @@
       ],
       "title": "Emitted",
       "type": "string"
+    },
+    "outcome": {
+      "anyOf": [
+        {
+          "enum": [
+            "ran",
+            "failed"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Outcome"
     },
     "p_harm": {
       "anyOf": [
