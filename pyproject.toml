@@ -23,7 +23,8 @@ llm = ["anthropic>=0.40"]
 mcp = ["mcp>=1.10"]
 report = ["matplotlib>=3.8"]
 dev = ["pytest>=8", "hypothesis>=6.100", "ruff>=0.5"]
-all = ["noulgate[serve,llm,mcp,report,dev]"]
+helix = ["helix-db==0.3.4", "helix-db-embedded==0.3.3"]
+all = ["noulgate[serve,llm,mcp,report,dev,helix]"]
 
 [project.scripts]
 noulgate = "noulgate.cli:main"
