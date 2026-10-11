@@ -10,6 +10,7 @@ from .backends.base import Answers, DecisionBackend
 from .features.builder import GateState
 from .policy.combiner import Combiner, predicted_class
 from .policy.conformal import ConformalPolicy, ThresholdPolicy
+from .policy.fastpath import FASTPATH_CLASS, fast_answers, fast_path
 from .questions import QuestionSet
 from .schema import Decision
 
@@ -65,22 +66,30 @@ class Gate:
 
     def decide_batch(self, states: list[GateState]) -> list[GateResult]:
         t = time.perf_counter()
-        all_answers = self.backend.decide_batch(states, self.questions)
-        per_call_ms = (time.perf_counter() - t) * 1000 / max(len(states), 1)
+        use_fast = getattr(self.policy, "fastpath", False)
+        fast = [fast_path(s) if use_fast else None for s in states]
+        model_states = [s for s, f in zip(states, fast, strict=True) if not f]
+        model_answers = iter(self.backend.decide_batch(model_states, self.questions) if model_states else [])
+        per_call_ms = (time.perf_counter() - t) * 1000 / max(len(model_states), 1)
         out = []
-        for state, answers in zip(states, all_answers, strict=True):
-            p = self.combiner.score(answers, state.flags)
-            cls = predicted_class(answers)
-            decision, reason = self.policy.decide(p, cls)
+        for state, reason in zip(states, fast, strict=True):
+            if reason:
+                answers, p, cls, ms = fast_answers(reason), 0.0, FASTPATH_CLASS, 0.0
+            else:
+                answers = next(model_answers)
+                p, cls, ms = self.combiner.score(answers, state.flags), predicted_class(answers), per_call_ms
+            decision, why = self.policy.decide(p, cls)
+            if reason:
+                why = f"fast path ({reason}); {why}"
             out.append(
                 GateResult(
                     decision,
                     p,
                     cls,
                     answers,
-                    reason,
-                    per_call_ms,
-                    self.backend.name,
+                    why,
+                    ms,
+                    "fastpath" if reason else self.backend.name,
                     self.policy.policy_id,
                     list(state.untrusted_only),
                     _taint_note(state),

@@ -108,9 +108,12 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
         )
         return 2
     backend = _backend(args.backend)
-    cal = score_rows(rows, backend, qs, args.cache)
-    fit = score_rows(fit_rows, backend, qs, args.cache) if fit_rows else []
-    policy = fit_and_calibrate(fit, cal, qs, args.alpha, args.beta, per_class=not args.global_only)
+    fast = not args.no_fastpath
+    cal = score_rows(rows, backend, qs, args.cache, fastpath=fast)
+    fit = score_rows(fit_rows, backend, qs, args.cache, fastpath=fast) if fit_rows else []
+    policy = fit_and_calibrate(
+        fit, cal, qs, args.alpha, args.beta, per_class=not args.global_only, fastpath=fast
+    )
     policy.backend, policy.data_hash = backend.name, data_hash(rows)
     Path(args.out).write_text(json.dumps(policy.to_dict(), indent=2) + "\n")
     s = policy.calibration_stats
@@ -137,7 +140,9 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     rows = [r for r in read_jsonl(args.data) if r.label]
     policy = load_policy(args.policy)
     backend_name = args.backend or getattr(policy, "backend", None) or "rules"
-    scored = score_rows(rows, _backend(backend_name), qs, args.cache)
+    scored = score_rows(
+        rows, _backend(backend_name), qs, args.cache, fastpath=getattr(policy, "fastpath", False)
+    )
     metrics = evaluate_policy(policy, scored, qs)
     if getattr(policy, "alpha", None) is not None:
         from .policy.conformal import false_allow_upper
@@ -175,8 +180,13 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     for name in args.backends.split(","):
         backend = _backend(name)
         cache = Path(args.cache_dir) / f"{name}.jsonl" if args.cache_dir else None
-        scored = score_rows(rows, backend, qs, cache)
-        results[backend.name] = repeated_splits(scored, by_id, qs, alphas, args.beta, n_splits=args.splits)
+        fast = not args.no_fastpath
+        scored = score_rows(rows, backend, qs, cache, fastpath=fast)
+        results[backend.name] = repeated_splits(
+            scored, by_id, qs, alphas, args.beta, n_splits=args.splits, fastpath=fast
+        )
+        n_fast = sum(bool(s.fastpath) for s in scored)
+        print(f"{backend.name}: fast path scored {n_fast}/{len(scored)} rows without the model")
         lat = sorted(s.latency_ms for s in scored)
         latency[backend.name] = {
             "p50_ms": lat[len(lat) // 2],
@@ -406,6 +416,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--fit-fraction", type=float, default=0.0, help="hold out this share of --data to fit the combiner"
     )
     c.add_argument("--global-only", action="store_true", help="one threshold pair instead of per risk class")
+    c.add_argument(
+        "--no-fastpath", action="store_true", help="run the model on every call (see policy/fastpath.py)"
+    )
     c.add_argument("--cache", help="JSONL cache of backend answers")
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--questions")
@@ -428,6 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--splits", type=int, default=20)
     b.add_argument("--cache-dir")
     b.add_argument("--latency-runs", type=int, default=0)
+    b.add_argument("--no-fastpath", action="store_true")
     b.add_argument("--report")
     b.add_argument("--json-out")
     b.add_argument("--questions")
