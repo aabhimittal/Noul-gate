@@ -197,3 +197,10 @@ def test_monitor_with_reference_but_no_decisions_says_so():
     rep = monitor([], _policy(rng))
     assert any("no scored decisions" in n for n in rep.notes)
     assert not any("score_reference" in n for n in rep.notes)
+
+
+def test_monitor_does_not_alert_on_drift_from_a_handful_of_calls():
+    rng = np.random.default_rng(5)
+    rep = monitor(_decisions(rng, 6, (8, 1)), _policy(rng))
+    assert rep.drift["psi_vs_benign"] > 1 and not rep.alert
+    assert any("alerts need 50" in n for n in rep.notes)

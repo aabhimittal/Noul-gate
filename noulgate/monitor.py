@@ -30,6 +30,7 @@ from .feedback import harvest
 PSI_ALERT = 0.2
 KS_ALERT = 0.2
 RATE_FACTOR_ALERT = 2.0
+MIN_DRIFT_N = 50  # PSI/KS on a handful of calls is noise
 
 
 def parse_window(text: str) -> timedelta:
@@ -179,11 +180,15 @@ def monitor(
     if "benign" in ref and len(scored):
         drift["psi_vs_benign"] = psi_against_quantiles(scored, ref["benign"])
         drift["ks_vs_benign"] = ks_against_quantiles(scored, ref["benign"])
-        if drift["psi_vs_benign"] > PSI_ALERT:
+        if len(scored) < MIN_DRIFT_N:
+            notes.append(
+                f"only {len(scored)} scored decisions: drift statistics are shown but alerts need {MIN_DRIFT_N}"
+            )
+        elif drift["psi_vs_benign"] > PSI_ALERT:
             alerts.append(
                 f"score drift: PSI {drift['psi_vs_benign']:.2f} > {PSI_ALERT} against calibration benign scores"
             )
-        if drift["ks_vs_benign"] > KS_ALERT:
+        if len(scored) >= MIN_DRIFT_N and drift["ks_vs_benign"] > KS_ALERT:
             alerts.append(f"score drift: KS {drift['ks_vs_benign']:.2f} > {KS_ALERT}")
     elif policy is not None and "benign" not in ref:
         notes.append(
