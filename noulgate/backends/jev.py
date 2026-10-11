@@ -31,10 +31,12 @@ class JevBackend(DecisionBackend):
         url: str = JEV_URL,
         timeout: float = 5.0,
         budget_chars: int = 6000,
+        harden: bool = True,
         client: httpx.Client | None = None,
     ):
         self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY")
-        self.model, self.url, self.budget_chars = model, url, budget_chars
+        self.model, self.url, self.budget_chars, self.harden = model, url, budget_chars, harden
+        self.name = "jev" + ("+hardened" if harden else "")
         self.client = client or httpx.Client(timeout=timeout)
 
     def decide_batch(self, states: list[GateState], questions: QuestionSet) -> list[Answers]:
@@ -46,7 +48,7 @@ class JevBackend(DecisionBackend):
                 self.url,
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
-                    "state": s.to_model_state(self.budget_chars),
+                    "state": s.to_model_state(self.budget_chars, harden=self.harden),
                     "model": self.model,
                     "questions": questions.to_d1(),
                 },

@@ -61,10 +61,18 @@ def _prompt(state: dict[str, Any], questions: QuestionSet) -> str:
 class LLMJudgeBackend(DecisionBackend):
     name = "llm"
 
-    def __init__(self, model: str = DEFAULT_MODEL, client=None, budget_chars: int = 6000, workers: int = 8):
+    def __init__(
+        self,
+        model: str = DEFAULT_MODEL,
+        client=None,
+        budget_chars: int = 6000,
+        workers: int = 8,
+        harden: bool = True,
+    ):
+        self.harden = harden
         self.model, self.budget_chars, self.workers = model, budget_chars, workers
         self._client = client
-        self.name = f"llm:{model}"
+        self.name = f"llm:{model}" + ("+hardened" if harden else "")
 
     @property
     def client(self):
@@ -83,7 +91,12 @@ class LLMJudgeBackend(DecisionBackend):
             system=SYSTEM,
             output_config={"effort": "low", "format": {"type": "json_schema", "schema": _schema(questions)}},
             messages=[
-                {"role": "user", "content": _prompt(state.to_model_state(self.budget_chars), questions)}
+                {
+                    "role": "user",
+                    "content": _prompt(
+                        state.to_model_state(self.budget_chars, harden=self.harden), questions
+                    ),
+                }
             ],
         )
         if response.stop_reason == "refusal":

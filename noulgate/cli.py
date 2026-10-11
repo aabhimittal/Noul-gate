@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+DEFAULT_STORE = "embedded:" + str(Path.home() / ".noulgate" / "helix")
+
 
 def _questions(args):
     from .questions import load_questions
@@ -82,7 +84,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             "noulgate: no --policy given; using the UNCALIBRATED 0.5 threshold (no guarantee).",
             file=sys.stderr,
         )
-    app = create_app(_backend(args.backend), _questions(args), policy, warmup=not args.no_warmup)
+    store = None
+    if args.store:
+        from .store.helix import HelixStore
+
+        store = HelixStore(args.store)
+    app = create_app(_backend(args.backend), _questions(args), policy, warmup=not args.no_warmup, store=store)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
@@ -179,7 +186,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     results, latency = {}, {}
     for name in args.backends.split(","):
         backend = _backend(name)
-        cache = Path(args.cache_dir) / f"{name}.jsonl" if args.cache_dir else None
+        cache = Path(args.cache_dir) / f"{name.split(':')[0]}.jsonl" if args.cache_dir else None
         fast = not args.no_fastpath
         scored = score_rows(rows, backend, qs, cache, fastpath=fast)
         results[backend.name] = repeated_splits(
@@ -294,11 +301,60 @@ def _cmd_agreement(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- feedback / monitoring
 
 
+def _records(args: argparse.Namespace) -> list[dict]:
+    """Audit records from --store (HelixDB) if given, else from the JSONL --log."""
+    if getattr(args, "store", None):
+        from .store.helix import HelixStore
+
+        store = HelixStore(args.store)
+        try:
+            return store.records()
+        finally:
+            store.close()
+    from .feedback import read_records
+
+    return read_records(args.log)
+
+
+def _cmd_store(args: argparse.Namespace) -> int:
+    from .store.helix import HelixStore
+
+    store = HelixStore(args.store)
+    try:
+        if args.action == "sync":
+            from .feedback import harvest, read_records
+
+            records = read_records(args.log)
+            stats = store.ingest(records, rebuild_provenance=not args.no_provenance)
+            answers = 0
+            for ask in harvest(records):
+                if ask.answer != "unknown":
+                    answers += store.record_answer(ask.decision["tool_use_id"], ask.answer)
+            stats["human_answers"] = answers
+            print(json.dumps({"synced": stats, "graph": store.counts()}, indent=2))
+        elif args.action == "stats":
+            print(json.dumps(store.counts(), indent=2))
+        else:
+            if args.query == "tainted-egress":
+                rows = store.tainted_egress_chains()
+            elif args.query == "injected-targets":
+                rows = store.injected_targets(min_calls=args.min_calls)
+            else:
+                if not args.session:
+                    print("--session is required for the session query", file=sys.stderr)
+                    return 2
+                rows = store.session_timeline(args.session)
+            print(json.dumps(rows, indent=2, default=str))
+    finally:
+        store.close()
+    return 0
+
+
 def _cmd_harvest(args: argparse.Namespace) -> int:
     from .datasets import write_jsonl
-    from .feedback import harvest, read_records, summary, to_labeled
+    from .feedback import harvest, summary, to_labeled
 
-    asks = harvest(read_records(args.log))
+    asks = harvest(_records(args))
     print(f"asks: {summary(asks)}")
     rows = to_labeled(asks, auto_label=args.auto_label)
     if args.out:
@@ -309,11 +365,10 @@ def _cmd_harvest(args: argparse.Namespace) -> int:
 
 
 def _cmd_monitor(args: argparse.Namespace) -> int:
-    from .feedback import read_records
     from .monitor import monitor
 
     policy = json.loads(Path(args.policy).read_text()) if args.policy else None
-    rep = monitor(read_records(args.log), policy, window=args.window, policy_id=args.policy_id).to_dict()
+    rep = monitor(_records(args), policy, window=args.window, policy_id=args.policy_id).to_dict()
     o = rep["overall"]
     print(
         f"{rep['n_decisions']} decisions: allow {o['allow_rate']:.3f}  ask {o['ask_rate']:.3f}  "
@@ -347,7 +402,7 @@ def _cmd_attack(args: argparse.Namespace) -> int:
     rows = [r for r in read_jsonl(args.data) if r.label]
     results = []
     for name in args.backends.split(","):
-        cache = Path(args.cache_dir) / f"{name}.jsonl" if args.cache_dir else None
+        cache = Path(args.cache_dir) / f"{name.split(':')[0]}.jsonl" if args.cache_dir else None
         res = run_attack(
             rows,
             _backend(name),
@@ -443,6 +498,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=7701)
     s.add_argument("--no-warmup", action="store_true")
+    s.add_argument(
+        "--store", help="also record decisions in HelixDB: memory | embedded:<dir> | http://host:6969"
+    )
     s.set_defaults(func=_cmd_serve)
 
     c = sub.add_parser("calibrate", help="set conformal thresholds from labeled calibration data")
@@ -549,7 +607,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="approved -> benign, rejected -> harmful (otherwise answers are only hints)",
     )
+    hv.add_argument("--store", help="read decisions from HelixDB instead of --log")
     hv.set_defaults(func=_cmd_harvest)
+
+    st = sub.add_parser(
+        "store", help="HelixDB graph store: sync the audit log, query provenance/taint graphs"
+    )
+    st_sub = st.add_subparsers(dest="action", required=True)
+    ss = st_sub.add_parser(
+        "sync", help="ingest an audit log (idempotent), rebuilding provenance from transcripts"
+    )
+    ss.add_argument("--log", default=str(Path.home() / ".noulgate" / "audit.jsonl"))
+    ss.add_argument("--no-provenance", action="store_true", help="skip reading transcripts")
+    sq = st_sub.add_parser("query", help="canned graph queries")
+    sq.add_argument("query", choices=["tainted-egress", "injected-targets", "session"])
+    sq.add_argument("--session")
+    sq.add_argument("--min-calls", type=int, default=1)
+    sst = st_sub.add_parser("stats", help="node counts")
+    for p_ in (ss, sq, sst):
+        p_.add_argument(
+            "--store",
+            default=DEFAULT_STORE,
+            help="memory | embedded:<dir> | http://host:6969 (default: ~/.noulgate/helix)",
+        )
+    st.set_defaults(func=_cmd_store)
 
     mo = sub.add_parser("monitor", help="decision rates, ask outcomes and score drift; exit 1 on alert")
     mo.add_argument("--log", default=str(Path.home() / ".noulgate" / "audit.jsonl"))
@@ -558,6 +639,7 @@ def build_parser() -> argparse.ArgumentParser:
     mo.add_argument("--window", default="1d", help="bucket size: 30m, 6h, 1d ...")
     mo.add_argument("--report")
     mo.add_argument("--json-out")
+    mo.add_argument("--store", help="read decisions from HelixDB instead of --log")
     mo.set_defaults(func=_cmd_monitor)
 
     m = sub.add_parser("mcp-proxy", help="gate every tools/call of an upstream stdio MCP server")
