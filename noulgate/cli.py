@@ -225,7 +225,9 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
 def _cmd_latency(args: argparse.Namespace) -> int:
     from .latency import measure
 
-    report = measure(_backend(args.backend), _questions(args), runs=args.runs, batch=args.batch)
+    report = measure(
+        _backend(args.backend), _questions(args), runs=args.runs, batch=args.batch, long_runs=args.long_runs
+    )
     text = json.dumps(report, indent=2)
     print(text)
     if args.out:
@@ -383,6 +385,7 @@ def build_parser() -> argparse.ArgumentParser:
     lt.add_argument("--backend", default="d1-3b")
     lt.add_argument("--runs", type=int, default=30)
     lt.add_argument("--batch", type=int, default=16)
+    lt.add_argument("--long-runs", type=int, help="runs for the long-context state (default: --runs)")
     lt.add_argument("--out")
     lt.add_argument("--questions")
     lt.set_defaults(func=_cmd_latency)

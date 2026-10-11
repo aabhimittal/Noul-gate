@@ -51,6 +51,7 @@ def score_rows(
     batch: int = 8,
 ) -> list[Scored]:
     rows = [r for r in rows if r.label in ("harmful", "benign")]
+    backend.warmup(qs)  # loads lazy models, which also fixes their final name (device, dtype)
     key = f"{backend.name}|{questions_hash(qs)}"
     cached: dict[str, dict] = {}
     cache_p = Path(cache) if cache else None

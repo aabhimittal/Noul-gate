@@ -28,12 +28,16 @@ class D1Backend(DecisionBackend):
         device: str | None = None,
         compile: bool = False,
         budget_chars: int = 6000,
+        dtype: str | None = None,
     ):
         self.model_id = model_id
         self.revision = revision or os.environ.get("NOULGATE_D1_REVISION", PINNED_REVISION)
         self.device = device
         self.compile = compile
         self.budget_chars = budget_chars
+        # float32 on CPU per the model card; bfloat16 is much faster on CPUs with AMX/AVX512-BF16.
+        # Calibrate with the same dtype you deploy: answers shift slightly between precisions.
+        self.dtype = dtype or os.environ.get("NOULGATE_D1_DTYPE")
         self._model = None
 
     def _load(self):
@@ -47,13 +51,15 @@ class D1Backend(DecisionBackend):
         device = self.device or (
             "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         )
-        dtype = torch.float32 if device == "cpu" else torch.bfloat16
+        name = self.dtype or ("float32" if device == "cpu" else "bfloat16")
+        dtype = getattr(torch, name)
         model = AutoModel.from_pretrained(
             self.model_id, trust_remote_code=True, dtype=dtype, revision=self.revision
         ).to(device)
         if self.compile and device == "cuda":
             model.compile(mode="reduce-overhead")
         self.device, self._model = device, model
+        self.name = f"d1-3b[{device},{name}]"
         return model
 
     def warmup(self, questions: QuestionSet) -> None:

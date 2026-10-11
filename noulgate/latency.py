@@ -45,8 +45,14 @@ def sample_states() -> dict[str, GateState]:
 
 
 def measure(
-    backend: DecisionBackend, questions: QuestionSet, runs: int = 30, batch: int = 16, warmup: int = 3
+    backend: DecisionBackend,
+    questions: QuestionSet,
+    runs: int = 30,
+    batch: int = 16,
+    warmup: int = 3,
+    long_runs: int | None = None,
 ) -> dict[str, Any]:
+    """`long_runs` caps the long-context runs (a 1.5k-token state takes tens of seconds on a CPU)."""
     t0 = time.perf_counter()
     backend.warmup(questions)
     report: dict[str, Any] = {
@@ -59,10 +65,11 @@ def measure(
     }
     states = sample_states()
     for label, state in states.items():
-        for _ in range(warmup):
+        n = runs if label == "short" or long_runs is None else long_runs
+        for _ in range(min(warmup, n)):
             backend.decide(state, questions)
         lat = []
-        for _ in range(runs):
+        for _ in range(n):
             t = time.perf_counter()
             backend.decide(state, questions)
             lat.append((time.perf_counter() - t) * 1000)
@@ -70,12 +77,13 @@ def measure(
             "p50_ms": round(statistics.median(lat), 2),
             "p99_ms": round(percentile(lat, 0.99), 2),
             "mean_ms": round(statistics.fmean(lat), 2),
+            "runs": n,
             "state_chars": len(str(state.to_model_state())),
         }
     batch_states = [states["short"]] * batch
     backend.decide_batch(batch_states, questions)
     t = time.perf_counter()
-    reps = max(1, runs // 10)
+    reps = max(1, min(runs // 10, 3))
     for _ in range(reps):
         backend.decide_batch(batch_states, questions)
     report["throughput_per_s"] = round(batch * reps / (time.perf_counter() - t), 2)
