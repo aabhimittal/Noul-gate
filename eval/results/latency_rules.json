@@ -1,0 +1,22 @@
+{
+  "backend": "rules",
+  "machine": "x86_64 x86_64",
+  "python": "3.13.16",
+  "warmup_s": 0.01,
+  "runs": 50,
+  "n_questions": 3,
+  "short": {
+    "p50_ms": 0.04,
+    "p99_ms": 0.09,
+    "mean_ms": 0.04,
+    "state_chars": 202
+  },
+  "with_context": {
+    "p50_ms": 0.05,
+    "p99_ms": 0.09,
+    "mean_ms": 0.05,
+    "state_chars": 5455
+  },
+  "throughput_per_s": 25763.74,
+  "batch": 16
+}
