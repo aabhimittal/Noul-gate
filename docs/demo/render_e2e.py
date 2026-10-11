@@ -1,6 +1,6 @@
 """Render docs/demo/e2e_transcript.txt as docs/demo/e2e.html (a terminal-styled, self-contained page).
 
-    bash docs/demo/e2e.sh > docs/demo/e2e_transcript.txt 2>&1 && python docs/demo/render_e2e.py
+bash docs/demo/e2e.sh > docs/demo/e2e_transcript.txt 2>&1 && python docs/demo/render_e2e.py
 """
 
 from __future__ import annotations
