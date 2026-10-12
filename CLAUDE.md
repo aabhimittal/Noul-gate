@@ -45,7 +45,8 @@ Postgres, Redis or ad-hoc JSON files for that.
 
 `serve.py` takes an optional bearer `token` (guards `/v1/*` and `/healthz`); `noulgate serve` refuses a
 non-loopback host without one. `/` and the PWA manifest come from `noulgate/web/`. Render API data in the
-console with `textContent` only: tool args are attacker-controlled.
+console with `textContent` only: tool args are attacker-controlled. `approve_wait` lets the console answer
+an `ask` on `/v1/decide` (needs the token); an unanswered ask must stay `ask`, never become `allow`.
 
 ## Before pushing
 

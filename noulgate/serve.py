@@ -15,9 +15,10 @@ import hmac
 import logging
 import threading
 import time
+import uuid
 from collections import deque
 from importlib.resources import files
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
@@ -48,6 +49,10 @@ class HookBatch(BaseModel):
     hooks: list[HookInput]
 
 
+class Verdict(BaseModel):
+    verdict: Literal["allow", "deny"]
+
+
 def create_app(
     backend: DecisionBackend,
     questions: QuestionSet,
@@ -55,8 +60,15 @@ def create_app(
     warmup: bool = True,
     store=None,
     token: str | None = None,
+    approve_wait: float = 0.0,
 ):
-    """`store` (a store.helix.HelixStore) records every decision with its provenance and taint graph."""
+    """`store` (a store.helix.HelixStore) records every decision with its provenance and taint graph.
+
+    `approve_wait` > 0: a hook call that comes out `ask` waits up to that many seconds for an Allow/Deny
+    from the console (`/v1/pending`), then stays `ask`. It grants tool permissions, so it needs `token`.
+    """
+    if approve_wait and not token:
+        raise ValueError("approve_wait grants tool permissions; it needs a token")
     from fastapi import FastAPI, Request
     from fastapi.responses import HTMLResponse, JSONResponse, Response
 
@@ -64,6 +76,7 @@ def create_app(
     builder = FeatureBuilder()
     lock = threading.Lock()  # one forward pass at a time; models are not assumed thread-safe
     app = FastAPI(title="noulgate", version="0.1.0")
+    pending: dict[str, dict[str, Any]] = {}  # asks waiting for the console; id -> entry with an Event
     recent: deque[dict[str, Any]] = deque(maxlen=200)  # in-memory only; the JSONL log is the record
     web = files("noulgate") / "web"
 
@@ -89,6 +102,19 @@ def create_app(
     @app.get("/manifest.webmanifest", include_in_schema=False)
     def manifest() -> Response:
         return Response((web / "manifest.webmanifest").read_text(), media_type="application/manifest+json")
+
+    @app.get("/v1/pending")
+    def pending_asks() -> list[dict[str, Any]]:
+        return [{k: v for k, v in e.items() if k != "event"} for e in list(pending.values())]
+
+    @app.post("/v1/pending/{ask_id}")
+    def resolve(ask_id: str, body: Verdict) -> dict[str, Any]:
+        entry = pending.get(ask_id)
+        if entry is None:
+            return JSONResponse({"detail": "no such pending ask (answered or timed out)"}, status_code=404)
+        entry["verdict"] = body.verdict
+        entry["event"].set()
+        return {"id": ask_id, "verdict": body.verdict}
 
     @app.get("/v1/recent")
     def recent_decisions(limit: int = 50) -> list[dict[str, Any]]:
@@ -152,6 +178,29 @@ def create_app(
         state = builder.from_hook(hook)
         with lock:
             result = gate.decide(state).to_dict()
+        if result["decision"] == "ask" and approve_wait > 0:  # wait outside the lock
+            ask_id = uuid.uuid4().hex
+            entry = {
+                "id": ask_id,
+                "ts": time.time(),
+                "tool": hook.tool_name,
+                "args": str(hook.tool_input)[:300],
+                "reason": result.get("reason"),
+                "verdict": None,
+                "event": threading.Event(),
+            }
+            pending[ask_id] = entry
+            try:
+                entry["event"].wait(approve_wait)
+            finally:
+                pending.pop(ask_id, None)
+            if entry["verdict"]:
+                result.update(
+                    decision=entry["verdict"],
+                    reason=f"{entry['verdict']} from the NOUL-GATE console",
+                    remote=True,
+                )
+        with lock:
             remember(
                 result,
                 state,
@@ -162,7 +211,7 @@ def create_app(
                 transcript_path=hook.transcript_path,
                 cwd=hook.cwd,
             )
-            return result
+        return result
 
     @app.post("/v1/decide_batch")
     def decide_batch(req: HookBatch) -> list[dict[str, Any]]:

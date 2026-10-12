@@ -92,13 +92,28 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.approve_wait and not token:
+        print("noulgate: --approve-wait grants tool permissions; it needs --token.", file=sys.stderr)
+        return 2
+    if args.approve_wait:
+        print(
+            f"noulgate: asks wait {args.approve_wait:g}s for the console; give the hook --timeout"
+            f" {args.approve_wait + 5:g} or more.",
+            file=sys.stderr,
+        )
     store = None
     if args.store:
         from .store.helix import HelixStore
 
         store = HelixStore(args.store)
     app = create_app(
-        _backend(args.backend), _questions(args), policy, warmup=not args.no_warmup, store=store, token=token
+        _backend(args.backend),
+        _questions(args),
+        policy,
+        warmup=not args.no_warmup,
+        store=store,
+        token=token,
+        approve_wait=args.approve_wait,
     )
     print(f"noulgate: console at http://{args.host}:{args.port}/", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
@@ -565,6 +580,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=7701)
     s.add_argument("--no-warmup", action="store_true")
+    s.add_argument(
+        "--approve-wait",
+        type=float,
+        default=0.0,
+        help="seconds an `ask` waits for Allow/Deny from the console (needs --token)",
+    )
     s.add_argument(
         "--token", help="require this bearer token (default $NOULGATE_TOKEN); needed off localhost"
     )
