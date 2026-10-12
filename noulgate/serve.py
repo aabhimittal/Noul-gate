@@ -66,6 +66,9 @@ def create_app(
 
     @app.middleware("http")
     async def auth(request: Request, call_next):
+        # Without a token, only loopback Host headers: blocks DNS-rebinding pages reading /v1/recent.
+        if not token and request.url.hostname not in ("127.0.0.1", "localhost", "::1"):
+            return JSONResponse({"detail": "non-loopback Host; start with --token"}, status_code=403)
         if token and request.url.path.startswith(("/v1/", "/healthz")):
             sent = request.headers.get("authorization", "")
             if not hmac.compare_digest(sent.encode(), f"Bearer {token}".encode()):
