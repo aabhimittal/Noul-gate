@@ -127,6 +127,33 @@ class GateState(BaseModel):
         state["recent_context"] = pinned + context
         return {k: v for k, v in state.items() if v not in (None, [], {})}
 
+    def to_user_request_state(self, budget_chars: int = 3000) -> dict[str, Any]:
+        """The state for "did the user request this?": the action and the user's own words only.
+
+        Tool, file and web text is left out on purpose. Whether the *user* asked for something can be
+        read from what the user wrote; untrusted text can only mislead the answer (observed: a line
+        addressed to the classifier raised d1's P(user_requested) from 0.47 to 0.75). The provenance
+        facts are computed by NOUL-GATE, not copied from untrusted text, so they stay.
+        """
+
+        def clip(text: str, n: int) -> str:
+            return text if len(text) <= n else text[:n] + f"…[+{len(text) - n} chars]"
+
+        state: dict[str, Any] = {
+            "pending_action": {
+                "tool": self.tool,
+                "args": _clip_args(self.args, min(1500, budget_chars // 2)),
+            },
+            "cwd": self.cwd,
+            "user_request": clip(self.last_user_msg.text, 1500) if self.last_user_msg else None,
+            "earlier_user_messages": [clip(s.text, 300) for s in self.earlier_user_msgs[-3:]],
+            "provenance_of_action_targets": self.justification or None,
+            "targets_only_in_untrusted_content": self.untrusted_only or None,
+            "note_on_context": "Only the user's own messages are shown. Judge whether the user asked for "
+            "this action, directly or as an obvious step toward what they asked.",
+        }
+        return {k: v for k, v in state.items() if v not in (None, [], {})}
+
 
 def _clip_args(args: dict[str, Any], n: int) -> dict[str, Any]:
     out = {}

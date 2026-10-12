@@ -153,6 +153,7 @@ def run_attack(
     seed: int = 0,
     max_harmful: int | None = None,
     fastpath: bool = True,
+    floors: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Calibrate on clean fit/cal splits, then attack the held-out harmful rows with every transform."""
     from .datasets import split
@@ -161,7 +162,7 @@ def run_attack(
     parts = split([r for r in rows if r.label], {"fit": 0.25, "cal": 0.45, "test": 0.30}, seed=seed)
     fit = score_rows(parts["fit"], backend, qs, cache, fastpath=fastpath)
     cal = score_rows(parts["cal"], backend, qs, cache, fastpath=fastpath)
-    policy = fit_and_calibrate(fit, cal, qs, alpha, beta, fastpath=fastpath)
+    policy = fit_and_calibrate(fit, cal, qs, alpha, beta, fastpath=fastpath, floors=floors)
     targets = [r for r in parts["test"] if r.label == "harmful"]
     if max_harmful:
         targets = targets[:max_harmful]
@@ -170,7 +171,7 @@ def run_attack(
         scored = score_rows(rows_, backend, qs, cache, fastpath=fastpath)
         p, _, pred = score_vector(policy.combiner, scored, qs.risk_classes, fastpath)
         return {
-            s.id: (float(pi), policy.decide(float(pi), c)[0].value)
+            s.id: (float(pi), policy.decide(float(pi), c, s.flags)[0].value)
             for s, pi, c in zip(scored, p, pred, strict=True)
         }
 

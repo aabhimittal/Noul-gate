@@ -59,6 +59,8 @@ header.top { display: grid; gap: 6px; }
 .slider label { display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--muted); }
 .slider label b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
 input[type="range"] { width: 100%; accent-color: var(--accent); }
+.floorToggle { display: flex; gap: 8px; align-items: flex-start; font-size: 0.85rem; color: var(--muted); grid-column: 1 / -1; }
+.floorToggle input { margin-top: 3px; accent-color: var(--accent); }
 .stats { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 0.85rem; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 10px; }
 .stats span b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
 
@@ -138,6 +140,7 @@ footer { font-size: 0.8rem; color: var(--muted); }
       <label for="beta">β, target false-deny rate <b id="betaVal"></b></label>
       <input id="beta" type="range" min="0.01" max="0.30" step="0.01">
     </div>
+    <label class="floorToggle" for="floors"><input id="floors" type="checkbox" checked> Flag floors: never auto-allow a call that sends data out after a secret was seen, or carries a secret</label>
     <div class="stats" id="stats" aria-live="polite"></div>
   </section>
 
@@ -164,7 +167,7 @@ footer { font-size: 0.8rem; color: var(--muted); }
 <script>
 const DATA = /*__DEMO_DATA__*/null;
 const $ = (id) => document.getElementById(id);
-const state = { backend: 0, scenario: DATA.scenarios[2].id, alpha: DATA.defaults.alpha, beta: DATA.defaults.beta };
+const state = { backend: 0, scenario: DATA.scenarios[2].id, alpha: DATA.defaults.alpha, beta: DATA.defaults.beta, floors: true };
 
 // Conformal thresholds: the same arithmetic as noulgate/policy/conformal.py
 function lambdaAllow(harmAsc, a) { const k = Math.floor(a * (harmAsc.length + 1)); return k >= 1 ? harmAsc[k - 1] : -Infinity; }
@@ -175,10 +178,12 @@ function decide(p, la, ld) {
   if (p > ld && p >= la) return "deny";
   return "ask";
 }
+// Flag floors (policy/conformal.py): a raised flag turns allow into ask. Only ever stricter, so α still holds.
+function floored(d, flagged) { return state.floors && flagged && d === "allow" ? "ask" : d; }
 function rates(test, la, ld) {
   let h = 0, b = 0, fa = 0, fd = 0, ask = 0;
-  for (const [p, y] of test) {
-    const d = decide(p, la, ld);
+  for (const [p, y, f] of test) {
+    const d = floored(decide(p, la, ld), f);
     if (d === "ask") ask++;
     if (y === 1) { h++; if (d === "allow") fa++; } else { b++; if (d === "deny") fd++; }
   }
@@ -222,7 +227,7 @@ function renderRail() {
   const rail = $("rail"); rail.replaceChildren();
   const { la, ld } = thresholds();
   for (const sc of DATA.scenarios) {
-    const r = B().scenarios[sc.id]; const d = decide(r.p_harm, la, ld);
+    const r = B().scenarios[sc.id]; const d = floored(decide(r.p_harm, la, ld), r.floor_flags.length > 0);
     const btn = el("button", { class: "scen", type: "button", "aria-current": String(sc.id === state.scenario) },
       el("span", { class: "t", text: sc.title }),
       el("span", { class: "e", text: sc.expect === "harmful" ? "harmful" : "harmless" }),
@@ -299,10 +304,12 @@ function ruler(p, la, ld) {
 
 function renderDecision() {
   const sc = DATA.scenarios.find((s) => s.id === state.scenario);
-  const r = B().scenarios[sc.id]; const { la, ld } = thresholds(); const d = decide(r.p_harm, la, ld);
+  const r = B().scenarios[sc.id]; const { la, ld } = thresholds(); const byScore = decide(r.p_harm, la, ld);
+  const d = floored(byScore, r.floor_flags.length > 0);
   const p = $("decisionPanel"); p.replaceChildren();
   let why;
-  if (r.fastpath) why = `Fast path (${r.fastpath}): scored 0 without running the model.`;
+  if (d !== byScore) why = `p(x) ${fmt(r.p_harm)} is below λ_allow ${fmt(la)}, so the score alone would allow it. But ${r.floor_flags.join(" and ")} is raised, and a flag floor caps the decision at ask, whatever the model says.`;
+  else if (r.fastpath) why = `Fast path (${r.fastpath}): scored 0 without running the model.`;
   else if (d === "allow") why = `p(x) ${fmt(r.p_harm)} is below λ_allow ${fmt(la)}: fewer than α of harmful calibration calls score this low.`;
   else if (d === "deny") why = `p(x) ${fmt(r.p_harm)} is above λ_deny ${fmt(ld)}: fewer than β of harmless calibration calls score this high.`;
   else why = `p(x) ${fmt(r.p_harm)} falls between the thresholds, so neither guarantee covers it. A human decides.`;
@@ -389,6 +396,7 @@ function renderCurve() {
 function renderAll() { renderControls(); renderRail(); renderCall(); renderDecision(); renderGraph(); renderCurve(); }
 $("alpha").addEventListener("input", (e) => { state.alpha = +e.target.value; renderAll(); });
 $("beta").addEventListener("input", (e) => { state.beta = +e.target.value; renderAll(); });
+$("floors").addEventListener("change", (e) => { state.floors = e.target.checked; renderAll(); });
 renderAll();
 </script>
 </body>

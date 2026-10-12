@@ -97,6 +97,33 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- calibrate / eval / benchmark
 
 
+def _floors(text: str) -> dict[str, str]:
+    """`--floors`: "default", "none", or "flag=ask,flag2=deny"."""
+    from .policy.combiner import FLAG_NAMES
+    from .policy.conformal import DEFAULT_FLOORS
+
+    if text == "default":
+        return dict(DEFAULT_FLOORS)
+    if text == "none":
+        return {}
+    out = {}
+    for item in text.split(","):
+        flag, _, floor = item.partition("=")
+        if flag not in FLAG_NAMES or floor not in ("ask", "deny"):
+            raise SystemExit(f"--floors: expected flag=ask|deny with flag in {FLAG_NAMES}, got {item!r}")
+        out[flag] = floor
+    return out
+
+
+def _add_floors(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--floors",
+        default="default",
+        help="flags whose calls are never auto-allowed: 'default' (tainted_egress=ask,secret_in_args=ask), "
+        "'none', or flag=ask|deny,... (see policy/conformal.py)",
+    )
+
+
 def _cmd_calibrate(args: argparse.Namespace) -> int:
     from .datasets import data_hash, read_jsonl, split
     from .evaluate import fit_and_calibrate, score_rows
@@ -119,7 +146,14 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     cal = score_rows(rows, backend, qs, args.cache, fastpath=fast)
     fit = score_rows(fit_rows, backend, qs, args.cache, fastpath=fast) if fit_rows else []
     policy = fit_and_calibrate(
-        fit, cal, qs, args.alpha, args.beta, per_class=not args.global_only, fastpath=fast
+        fit,
+        cal,
+        qs,
+        args.alpha,
+        args.beta,
+        per_class=not args.global_only,
+        fastpath=fast,
+        floors=_floors(args.floors),
     )
     policy.backend, policy.data_hash = backend.name, data_hash(rows)
     Path(args.out).write_text(json.dumps(policy.to_dict(), indent=2) + "\n")
@@ -190,7 +224,14 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         fast = not args.no_fastpath
         scored = score_rows(rows, backend, qs, cache, fastpath=fast)
         results[backend.name] = repeated_splits(
-            scored, by_id, qs, alphas, args.beta, n_splits=args.splits, fastpath=fast
+            scored,
+            by_id,
+            qs,
+            alphas,
+            args.beta,
+            n_splits=args.splits,
+            fastpath=fast,
+            floors=_floors(args.floors),
         )
         n_fast = sum(bool(s.fastpath) for s in scored)
         print(f"{backend.name}: fast path scored {n_fast}/{len(scored)} rows without the model")
@@ -265,6 +306,20 @@ def _cmd_dataset(args: argparse.Namespace) -> int:
             "traces": ds.from_message_traces,
         }[args.format]
         rows = [r for p in args.paths for r in importer(p)]
+        if args.assume_label:
+            if not args.annotator:
+                print(
+                    "error: --assume-label needs --annotator (who vouches for these labels)", file=sys.stderr
+                )
+                return 2
+            rows = [
+                r
+                if r.label
+                else r.model_copy(
+                    update={"label": args.assume_label, "annotator": args.annotator, "notes": "assumed label"}
+                )
+                for r in rows
+            ]
         n = ds.write_jsonl(args.out, rows)
         print(f"wrote {n} rows to {args.out}: {ds.summary(rows)}")
     elif args.action == "split":
@@ -413,6 +468,7 @@ def _cmd_attack(args: argparse.Namespace) -> int:
             seed=args.seed,
             max_harmful=args.max_harmful,
             fastpath=not args.no_fastpath,
+            floors=_floors(args.floors),
         )
         results.append(res)
         print(
@@ -520,6 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--cache", help="JSONL cache of backend answers")
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--questions")
+    _add_floors(c)
     c.set_defaults(func=_cmd_calibrate)
 
     e = sub.add_parser("eval", help="evaluate a policy on labeled test data")
@@ -543,6 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--report")
     b.add_argument("--json-out")
     b.add_argument("--questions")
+    _add_floors(b)
     b.set_defaults(func=_cmd_benchmark)
 
     lt = sub.add_parser("latency", help="measure p50/p99 latency and batch throughput")
@@ -560,6 +618,12 @@ def build_parser() -> argparse.ArgumentParser:
     di.add_argument("format", choices=["claude-code", "injecagent", "traces"])
     di.add_argument("paths", nargs="+")
     di.add_argument("--out", required=True)
+    di.add_argument(
+        "--assume-label",
+        choices=["benign", "harmful"],
+        help="label every unlabeled row (e.g. benign for sessions you supervised); review with `noulgate label`",
+    )
+    di.add_argument("--annotator", help="recorded with --assume-label")
     dsp = dsub.add_parser("split")
     dsp.add_argument("--data", required=True)
     dsp.add_argument("--out-dir", required=True)
@@ -595,6 +659,7 @@ def build_parser() -> argparse.ArgumentParser:
     at.add_argument("--report")
     at.add_argument("--json-out")
     at.add_argument("--questions")
+    _add_floors(at)
     at.set_defaults(func=_cmd_attack)
 
     hv = sub.add_parser(

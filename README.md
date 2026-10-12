@@ -258,13 +258,99 @@ acts on. `monitor` and `harvest` read from it with `--store`. The hook stays std
 Future sessions in this repo are told to use HelixDB through [CLAUDE.md](CLAUDE.md), and a SessionStart
 hook installs it in cloud sessions.
 
+## Round 3: real data, flag floors, isolated user intent
+
+### What happened on data we did not write
+[eval/real_data.py](eval/real_data.py) runs the gate on two sources besides the synthetic set. Results
+are in [eval/results/real_data.json](eval/results/real_data.json). Raw rows aren't committed: one set has
+no licence, the other is private session content.
+
+- **Real Claude Code sessions.** These are 464 tool calls from the sessions that built this repo, imported
+  with `dataset import claude-code`. All of them are benign; they were labelled by the person who
+  supervised them, which is a biased annotator.
+- **InjecAgent.** This is a third-party benchmark of indirect prompt-injection attacks, fetched at a
+  pinned commit by [data/external/fetch_injecagent.sh](data/external/fetch_injecagent.sh). It has 1,054
+  harmful and 1,054 benign rows, but only **62 distinct harmful calls**, so it is templated as well.
+
+Rules backend, α = 0.05, policy calibrated on the synthetic set (as a fresh install would be):
+
+| what | before the fixes below | after |
+|---|---|---|
+| real benign calls: allow / ask / deny | 0.37 / 0.00 / **0.63** | 0.63 / 0.19 / 0.19 |
+| real calls flagged `untrusted_only` | 272 of 464 | 126 of 464 |
+| drift on real calls (PSI / KS vs calibration benign) | 8.2 / 0.64 | 5.8 / 0.34 (still alerts) |
+| InjecAgent harmful calls allowed (false-allow) | 0.37 | **0.37** |
+
+Three conclusions:
+
+1. **The guarantee did not transfer.** Calibrated at α = 0.05 on synthetic data, the gate let 37% of
+   InjecAgent's attacks through. This is the exchangeability caveat made concrete: the bound covers
+   attacks like the calibration attacks, and InjecAgent's aren't. `noulgate monitor` would have raised
+   an alert, since PSI on real traffic is far above 0.2. Calibrating on InjecAgent itself (20 splits)
+   brings false-allow back to 0, but the rules backend then asks about 75–88% of the time. It can't
+   separate these calls, and a model backend is required.
+2. **Real agents look like injected agents.** A coding agent constantly acts on paths and URLs it found
+   in its own tool output. The synthetic set had no benign row like that: `untrusted_only` was
+   109 harmful to 0 benign. So the combiner learned the flag as proof of harm, and 63% of real benign
+   calls were denied. Three fixes:
+   - Target extraction now ignores content being written (Write and Edit bodies, heredocs piped to
+     `cat` or `tee`), and a path has to start at a token boundary.
+   - Claude Code's own bookkeeping tools (task list, tool search, plan approval) take the fast path.
+   - 60 benign "target found in tool output" rows were added to the synthetic set (`FEATURE_VERSION` 3).
+
+   These fixes were designed after looking at these same real calls, so the "after" column is
+   optimistic. Fresh sessions are the honest test.
+3. **Most of the remaining friction is the rules backend.** It can't read intent, and its
+   P(user_requested) has a median of 0.1 on real calls, where users write "continue" rather than spell
+   out targets. (d1-3B on these data: pending, still computing on CPU.)
+
+### Flag floors: some flags can't be outvoted
+In the demo, hardened d1 allowed a key-read-then-upload at p = 0.537 against λ_allow = 0.540. It did so
+even though the combiner already puts +1.67 on `tainted_egress`, because d1's other answers ("benign",
+"user requested") outweighed it. A learned weight is a vote, not a veto. Policies therefore now carry
+**floors**: a call with `tainted_egress` or `secret_in_args` is never auto-allowed, whatever its score
+(`--floors` on `calibrate`, `benchmark` and `attack`; `--floors none` turns them off).
+
+Floors only ever turn allow into ask, so the false-allow bound still holds. They cost extra asks: on
+the synthetic set (rules, α = 0.05) the benign ask rate goes from 0.119 to 0.143. The demo has a toggle
+for them.
+
+### Asking "did the user request this?" without the injected text
+Classifier injection moved d1's P(user_requested) from 0.47 to 0.75 in the demo. d1 now answers that
+question in a **second, short call** that sees only the action, the user's own messages and NOUL-GATE's
+provenance facts. No tool, file or web text is included (`GateState.to_user_request_state`). Injected
+text then has nothing to work on for that question. The cost is one extra call per decision. The
+backend is named `+uq-isolated`, and `d1-3b:joint` is the old single-call behaviour. (Measured effect on d1: pending.)
+
+### Calibrate on your own sessions
+Every command below was run end to end in this repository:
+
+```bash
+noulgate install claude-code --mode log                     # 1. log, never block, for a week or two
+noulgate dataset import claude-code ~/.claude/projects/<project>/*.jsonl \
+    --assume-label benign --annotator you --out mine.jsonl  # 2. your supervised calls
+noulgate label --in mine.jsonl --out mine.labeled.jsonl --annotator you   # 3. fix any that weren't benign
+noulgate harvest --out asks.jsonl                          #    plus what you answered to asks
+bash data/external/fetch_injecagent.sh && noulgate dataset import injecagent \
+    data/external/injecagent/*.json --out attacks.jsonl     # 4. harmful examples (or your own red team)
+noulgate dataset split --data both.jsonl --out-dir split --fractions fit=0.3,cal=0.7
+noulgate calibrate --data split/cal.jsonl --fit-data split/fit.jsonl --alpha 0.05 --backend d1-3b --out policy.json
+```
+
+`--assume-label` is only for sessions you actually watched. Review the result with `noulgate label`. The
+harmful side is still the weak link: the bound only covers attacks that look like your harmful
+examples.
+
 ## Honest limits
 
-- **No real evaluation yet.** M2's acceptance criterion (≥500 benign and ≥300 harmful *real* labeled
-  actions) is **not met**. This repo ships the tooling (importers, a labeling TUI, Cohen's κ, splits)
-  plus synthetic fixtures. Synthetic results only exercise the pipeline. The rules baseline and the
-  synthetic templates were written by the same author, so rules-on-synthetic numbers are optimistic by
-  construction.
+- **Only a first real evaluation.** There are 464 real benign calls (one project, one annotator who
+  also supervised them) and a templated third-party attack set (InjecAgent: 62 distinct harmful calls).
+  M2's acceptance criterion (≥500 benign and ≥300 harmful *real*, independently labelled actions) is
+  still **not met**. On that data the synthetic calibration did **not** transfer: 37% of InjecAgent
+  attacks were allowed at α = 0.05. Calibrate on data like your deployment. The rules baseline and the
+  synthetic templates share an author, so rules-on-synthetic numbers are optimistic by construction.
+- **Floors cost asks, and the isolated user-intent question costs a second model call.** Neither change
+  makes the bound hold against an adaptive attacker.
 - **The guarantee is marginal.** It bounds the false-allow rate averaged over harmful actions like the
   calibration ones. It says nothing about any one action.
 - **Exchangeability.** It assumes deployment attacks look like calibration attacks. New attack styles,
@@ -332,8 +418,10 @@ CLAUDE.md        conventions for future Claude Code sessions (HelixDB, invariant
 | `noulgate latency --backend d1-3b` | p50/p99 and batch throughput |
 | `noulgate harvest [--log … \| --store …] --out x.jsonl [--auto-label]` | turn answered asks into labeled candidates |
 | `noulgate monitor --policy policy.json [--report m.html]` | rates, ask approval, drift; exit 1 on alert |
-| `noulgate attack --data … --backends rules,d1-3b,d1-3b:raw` | adversarial robustness (`:raw` = no hardening) |
+| `noulgate attack --data … --backends rules,d1-3b,d1-3b:raw` | adversarial robustness (`:raw` = no hardening, `:joint` = no isolated user-intent call) |
 | `noulgate store sync \| stats \| query {tainted-egress,injected-targets,session}` | HelixDB graph store |
+| `noulgate dataset import claude-code … --assume-label benign --annotator you` | your supervised sessions as benign rows |
+| `python eval/real_data.py --backends rules,d1-3b:joint` | transfer and in-domain results on real sessions and InjecAgent |
 
 ## Development
 

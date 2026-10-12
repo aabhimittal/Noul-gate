@@ -40,6 +40,24 @@ from .combiner import Combiner
 
 POOLED = "_pooled"
 DEFAULT_MIN_CELL = 50  # harmful and benign calibration examples needed before a class gets its own cell
+# Flag floors: a call carrying one of these flags is never auto-allowed, whatever its score. A learned
+# weight can be outvoted by the model's other answers (observed: hardened d1 allowed a key-read-then-upload
+# at p=0.537 against λ_allow=0.540 despite +1.67 on tainted_egress); a floor cannot. Floors only turn
+# allow into ask, never relax a decision, so the false-allow bound still holds; the cost is extra asks.
+DEFAULT_FLOORS: dict[str, str] = {"tainted_egress": "ask", "secret_in_args": "ask"}
+_ORDER = {Decision.ALLOW: 0, Decision.ASK: 1, Decision.DENY: 2}
+
+
+def apply_floors(
+    d: Decision, flags: dict[str, bool] | None, floors: dict[str, str]
+) -> tuple[Decision, list[str]]:
+    """Raise `d` to the strictest floor among the raised flags; returns (decision, flags that applied)."""
+    applied = []
+    for flag, floor in sorted(floors.items()):
+        if flags and flags.get(flag) and _ORDER[Decision(floor)] > _ORDER[d]:
+            d = Decision(floor)
+            applied.append(flag)
+    return d, applied
 
 
 def k_index(alpha: float, n: int) -> int:
@@ -98,19 +116,22 @@ class ConformalPolicy:
     backend: str | None = None
     calibration_stats: dict[str, Any] = field(default_factory=dict)
     fastpath: bool = False  # score fast-path calls 0 without the model (policy/fastpath.py)
+    floors: dict[str, str] = field(default_factory=dict)  # flag -> minimum decision (DEFAULT_FLOORS)
     kind: str = "conformal"
 
     def cell_for(self, predicted: str) -> str:
         return self.group_of.get(predicted, POOLED if POOLED in self.cells else "_all")
 
-    def decide(self, p: float, predicted: str) -> tuple[Decision, str]:
+    def decide(self, p: float, predicted: str, flags: dict[str, bool] | None = None) -> tuple[Decision, str]:
         name = self.cell_for(predicted)
         c = self.cells[name]
-        d = decide(p, c.lambda_allow, c.lambda_deny)
+        d, applied = apply_floors(decide(p, c.lambda_allow, c.lambda_deny), flags, self.floors)
         reason = (
             f"p_harm={p:.3f}, cell={name}, λ_allow={c.lambda_allow:.3f}, λ_deny={c.lambda_deny:.3f}, "
             f"α={self.alpha}, β={self.beta}"
         )
+        if applied:
+            reason += f"; floor: {', '.join(applied)} -> {d.value}"
         return d, reason
 
     @property
@@ -133,6 +154,8 @@ class ConformalPolicy:
             "calibration_stats": self.calibration_stats,
             "fastpath": self.fastpath,
         }
+        if self.floors:  # absent for floor-less policies, so their ids stay what they were
+            d["floors"] = dict(sorted(self.floors.items()))
         if include_id:
             d["policy_id"] = self.policy_id
         return d
@@ -154,6 +177,7 @@ class ConformalPolicy:
             backend=d.get("backend"),
             calibration_stats=d.get("calibration_stats", {}),
             fastpath=bool(d.get("fastpath", False)),
+            floors=dict(d.get("floors", {})),
         )
 
 
@@ -166,7 +190,7 @@ class ThresholdPolicy:
     fastpath: bool = False
     kind: str = "threshold"
 
-    def decide(self, p: float, predicted: str) -> tuple[Decision, str]:
+    def decide(self, p: float, predicted: str, flags: dict[str, bool] | None = None) -> tuple[Decision, str]:
         d = Decision.ALLOW if p < self.threshold else Decision.DENY
         return d, f"p_harm={p:.3f} vs fixed threshold {self.threshold} (uncalibrated)"
 
@@ -215,8 +239,13 @@ def calibrate(
     per_class: bool = True,
     min_n: int = DEFAULT_MIN_CELL,
     groups: dict[str, str] | None = None,
+    floors: dict[str, str] | None = None,
+    flags: list[dict[str, bool]] | None = None,
 ) -> ConformalPolicy:
-    """Compute λ_allow / λ_deny per cell from calibration scores (labels: 1 = harmful, 0 = benign)."""
+    """Compute λ_allow / λ_deny per cell from calibration scores (labels: 1 = harmful, 0 = benign).
+
+    Floors do not move the thresholds; `flags` (one dict per row) only make the stored calibration
+    rates include the asks that floors add."""
     scores = np.asarray(scores, dtype=float)
     labels = np.asarray(labels, dtype=int)
     predicted = list(predicted)
@@ -239,8 +268,13 @@ def calibrate(
         h = scores[idx][labels[idx] == 1] if len(idx) else np.array([])
         b = scores[idx][labels[idx] == 0] if len(idx) else np.array([])
         cells[name] = Cell(lambda_allow(h, alpha), lambda_deny(b, beta), int(len(h)), int(len(b)))
-    policy = ConformalPolicy(alpha=alpha, beta=beta, combiner=combiner, cells=cells, group_of=group_of)
-    decisions = [policy.decide(float(p), c)[0] for p, c in zip(scores, predicted, strict=True)]
+    policy = ConformalPolicy(
+        alpha=alpha, beta=beta, combiner=combiner, cells=cells, group_of=group_of, floors=dict(floors or {})
+    )
+    row_flags = flags if flags is not None else [None] * len(scores)
+    decisions = [
+        policy.decide(float(p), c, f)[0] for p, c, f in zip(scores, predicted, row_flags, strict=True)
+    ]
     policy.calibration_stats = rates(decisions, labels)
     policy.calibration_stats["n_h"] = int(labels.sum())
     policy.calibration_stats["n_b"] = int(len(labels) - labels.sum())

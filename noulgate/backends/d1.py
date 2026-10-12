@@ -39,6 +39,7 @@ class D1Backend(DecisionBackend):
         budget_chars: int = 6000,
         dtype: str | None = None,
         harden: bool = True,
+        isolate_user_request: bool = True,
     ):
         self.model_id = model_id
         self.revision = revision or os.environ.get("NOULGATE_D1_REVISION", PINNED_REVISION)
@@ -46,6 +47,9 @@ class D1Backend(DecisionBackend):
         self.compile = compile
         self.budget_chars = budget_chars
         self.harden = harden
+        # Ask "did the user request this?" in a second call that sees only the user's words, so injected
+        # text cannot talk the model into "the user wanted this". Costs one extra (short) call per state.
+        self.isolate_user_request = isolate_user_request
         # The model card uses float32 on CPU. We default to bfloat16 where the CPU supports it natively.
         # Calibrate with the same dtype you deploy: answers shift slightly between precisions.
         self.dtype = dtype or os.environ.get("NOULGATE_D1_DTYPE")
@@ -71,7 +75,11 @@ class D1Backend(DecisionBackend):
             model.compile(mode="reduce-overhead")
         self.device, self._model = device, model
         # The model input differs with hardening, so cached answers must not be shared across it.
-        self.name = f"d1-3b[{device},{name}]" + ("+hardened" if self.harden else "")
+        self.name = (
+            f"d1-3b[{device},{name}]"
+            + ("+hardened" if self.harden else "")
+            + ("+uq-isolated" if self.isolate_user_request else "")
+        )
         return model
 
     def warmup(self, questions: QuestionSet) -> None:
@@ -82,5 +90,14 @@ class D1Backend(DecisionBackend):
         model = self._load()
         qs = questions.to_d1()
         requests = [(s.to_model_state(self.budget_chars, harden=self.harden), qs) for s in states]
-        results = model.system_one_batch(requests) if len(requests) > 1 else [model.system_one(*requests[0])]
-        return [self.finalize(r["answers"], questions) for r in results]
+        answers = [dict(r["answers"]) for r in self._run(model, requests)]
+        if self.isolate_user_request and "user_requested" in qs:
+            uq = {"user_requested": qs["user_requested"]}
+            isolated = self._run(model, [(s.to_user_request_state(), uq) for s in states])
+            for a, r in zip(answers, isolated, strict=True):
+                a["user_requested"] = r["answers"]["user_requested"]
+        return [self.finalize(a, questions) for a in answers]
+
+    @staticmethod
+    def _run(model, requests: list) -> list[dict]:
+        return model.system_one_batch(requests) if len(requests) > 1 else [model.system_one(*requests[0])]
