@@ -28,6 +28,7 @@ from noulgate.datasets import LabeledAction, read_jsonl, split  # noqa: E402
 from noulgate.evaluate import fit_and_calibrate, score_rows, score_vector  # noqa: E402
 from noulgate.features.provenance import Span  # noqa: E402
 from noulgate.policy.combiner import predicted_class  # noqa: E402
+from noulgate.policy.conformal import DEFAULT_FLOORS  # noqa: E402
 from noulgate.policy.fastpath import fast_path  # noqa: E402
 from noulgate.questions import load_questions  # noqa: E402
 
@@ -166,11 +167,11 @@ def backend_block(name: str, rows: list[LabeledAction], qs, cache: Path | None) 
     fit = score_rows(parts["fit"], backend, qs, cache)
     cal = score_rows(parts["cal"], backend, qs, cache)
     test = score_rows(parts["test"], backend, qs, cache)
-    policy = fit_and_calibrate(fit, cal, qs, alpha=0.05, beta=0.1, per_class=False)
+    policy = fit_and_calibrate(fit, cal, qs, alpha=0.05, beta=0.1, per_class=False, floors=DEFAULT_FLOORS)
     comb, classes = policy.combiner, qs.risk_classes
     p_cal, y_cal, _ = score_vector(comb, cal, classes, True)
     p_test, y_test, _ = score_vector(comb, test, classes, True)
-    demo = score_rows(rows, backend, qs, None)
+    demo = score_rows(rows, backend, qs, cache)
     p_demo, _, pred = score_vector(comb, demo, classes, True)
     per = {}
     for row, s, p, cls in zip(rows, demo, p_demo, pred, strict=True):
@@ -183,13 +184,18 @@ def backend_block(name: str, rows: list[LabeledAction], qs, cache: Path | None) 
             "severity": ans.get("severity", {}).get("scaled"),
             "risk_probs": {k: round(v, 3) for k, v in sorted(rc.items(), key=lambda kv: -kv[1])[:4]},
             "fastpath": s.fastpath,
+            "floor_flags": [f for f in DEFAULT_FLOORS if s.flags.get(f)],
         }
     return {
         "name": backend.name,
         "label": "d1-3B (bf16, CPU)" if name.startswith("d1") else "rules baseline",
+        "spec": name,
         "cal_harm": sorted(round(float(x), 5) for x, y in zip(p_cal, y_cal, strict=True) if y == 1),
         "cal_benign": sorted(round(float(x), 5) for x, y in zip(p_cal, y_cal, strict=True) if y == 0),
-        "test": [[round(float(x), 5), int(y)] for x, y in zip(p_test, y_test, strict=True)],
+        "test": [
+            [round(float(x), 5), int(y), int(any(s.flags.get(f) for f in DEFAULT_FLOORS))]
+            for x, y, s in zip(p_test, y_test, test, strict=True)
+        ],
         "scenarios": per,
     }
 
@@ -260,13 +266,19 @@ def graph_block() -> dict | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--d1", action="store_true", help="also run d1-3B (needs the [d1] extra and ~7 GB RAM)")
+    ap.add_argument(
+        "--d1",
+        nargs="?",
+        const="d1-3b:joint",
+        help="also run d1-3B (needs the [d1] extra and ~7 GB RAM); optional backend spec, default d1-3b:joint "
+        "(the spec whose calibration answers are cached)",
+    )
     args = ap.parse_args()
     qs = load_questions()
     rows = scenario_rows()
     backends = [backend_block("rules", rows, qs, ROOT / "eval/cache/rules.jsonl")]
     if args.d1:
-        backends.append(backend_block("d1-3b", rows, qs, ROOT / "eval/cache/d1-3b.jsonl"))
+        backends.append(backend_block(args.d1, rows, qs, ROOT / "eval/cache/d1-3b.jsonl"))
     data = {
         "scenarios": [
             {
@@ -278,7 +290,7 @@ def main() -> None:
         ],
         "backends": backends,
         "graph": graph_block(),
-        "defaults": {"alpha": 0.05, "beta": 0.10},
+        "defaults": {"alpha": 0.05, "beta": 0.10, "floors": DEFAULT_FLOORS},
     }
     (HERE / "demo_data.json").write_text(json.dumps(data, indent=1, default=str) + "\n")
     template = (HERE / "template.html").read_text()
