@@ -155,6 +155,7 @@ def fit_and_calibrate(
     per_class: bool = True,
     l2: float = 1.0,
     fastpath: bool = True,
+    floors: dict[str, str] | None = None,
 ) -> ConformalPolicy:
     classes = qs.risk_classes
     comb = Combiner(classes, l2=l2)
@@ -163,7 +164,9 @@ def fit_and_calibrate(
         Xf, yf, _ = design(model_rows, classes)
         comb.fit(Xf, yf)
     p, yc, pc = score_vector(comb, cal, classes, fastpath)
-    policy = calibrate(p, yc, pc, alpha, beta, comb, per_class=per_class)
+    policy = calibrate(
+        p, yc, pc, alpha, beta, comb, per_class=per_class, floors=floors, flags=[s.flags for s in cal]
+    )
     policy.fastpath = fastpath
     return policy
 
@@ -173,7 +176,7 @@ def evaluate_policy(
 ) -> dict[str, Any]:
     comb = policy.combiner or Combiner(qs.risk_classes)
     p, y, pred = score_vector(comb, test, qs.risk_classes, getattr(policy, "fastpath", False))
-    decisions = [policy.decide(float(pi), c)[0] for pi, c in zip(p, pred, strict=True)]
+    decisions = [policy.decide(float(pi), c, s.flags)[0] for pi, c, s in zip(p, pred, test, strict=True)]
     out = rates(decisions, y)
     out.update({"n_h": int(y.sum()), "n_b": int(len(y) - y.sum())})
     lat = [s.latency_ms for s in test]
@@ -193,6 +196,7 @@ def repeated_splits(
     per_class: bool = True,
     fit_combiner: bool = True,
     fastpath: bool = True,
+    floors: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """M3 acceptance: does empirical false-allow on held-out data stay within α + tolerance?"""
     fractions = fractions or {"fit": 0.25, "cal": 0.45, "test": 0.30}
@@ -209,7 +213,9 @@ def repeated_splits(
         test = [by_id[r.id] for r in parts["test"]]
         n_cal_h = sum(s.label for s in cal)
         for a in alphas:
-            pol = fit_and_calibrate(fit, cal, qs, a, beta, per_class=per_class, fastpath=fastpath)
+            pol = fit_and_calibrate(
+                fit, cal, qs, a, beta, per_class=per_class, fastpath=fastpath, floors=floors
+            )
             m = evaluate_policy(pol, test, qs)
             # per-cell guarantees hold cell by cell; for the global tolerance use the pooled sizes
             m["tolerance_95"] = false_allow_upper(n_cal_h, m["n_h"], a)

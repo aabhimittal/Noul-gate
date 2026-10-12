@@ -78,7 +78,7 @@ class Gate:
             else:
                 answers = next(model_answers)
                 p, cls, ms = self.combiner.score(answers, state.flags), predicted_class(answers), per_call_ms
-            decision, why = self.policy.decide(p, cls)
+            decision, why = self.policy.decide(p, cls, state.flags)
             if reason:
                 why = f"fast path ({reason}); {why}"
             out.append(
