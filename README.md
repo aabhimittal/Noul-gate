@@ -59,6 +59,10 @@ There is no TLS, so reach it through a tunnel (Tailscale, an SSH forward); phone
 page only over HTTPS. The console shows decisions; it cannot approve an `ask`, which stays in your
 terminal.
 
+Without a token the server answers only requests addressed to `127.0.0.1`, `localhost` or `::1`, and
+refuses any browser request whose `Origin` is another site. That blocks DNS-rebinding reads and
+cross-site posts, but it also refuses a tunnel or proxy that forwards under another name: use a token there.
+
 Other harnesses: `noulgate mcp-proxy -- <your stdio MCP server command>` gates any MCP client
 ([docs/mcp-clients.md](docs/mcp-clients.md)).
 

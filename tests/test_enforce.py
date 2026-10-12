@@ -109,6 +109,27 @@ def test_serve_endpoints():
     assert TestClient(tc.app, base_url="http://evil.example").get("/v1/recent").status_code == 403
 
 
+def test_no_token_refuses_cross_site_origin():
+    # a cross-site page posting to 127.0.0.1 passes the Host check; its Origin header gives it away
+    tc = TestClient(create_app(FakeBackend(), QS, _policy()), base_url=LOCAL)
+    body = {"tool": "Bash", "args": {"command": "ls"}}
+
+    def status(origin):
+        headers = {} if origin is None else {"Origin": origin}
+        return tc.post("/v1/decide_state", json=body, headers=headers).status_code
+
+    assert status(None) == 200  # the hook and curl send no Origin
+    for ok in ("http://127.0.0.1:7701", "http://localhost:7701", "http://[::1]:7701"):
+        assert status(ok) == 200, ok
+    for bad in ("http://evil.example", "http://localhost.evil.example", "null"):
+        assert status(bad) == 403, bad
+
+    # with a token, the bearer check already covers both: foreign Host and Origin still get in
+    tc = TestClient(create_app(FakeBackend(), QS, _policy(), token="s3cret"), base_url="http://gate.lan")
+    headers = {"Authorization": "Bearer s3cret", "Origin": "http://evil.example"}
+    assert tc.post("/v1/decide_state", json=body, headers=headers).status_code == 200
+
+
 def test_token_guards_api_but_not_console(monkeypatch):
     tc = TestClient(create_app(FakeBackend(), QS, _policy(), token="s3cret"))
     assert tc.get("/").status_code == 200 and "NOUL-GATE" in tc.get("/").text

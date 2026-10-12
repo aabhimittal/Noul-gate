@@ -2,6 +2,7 @@
 
 The Claude Code hook is a fresh process per tool call, so it cannot load a 3B model itself; in enforce
 mode it posts the hook payload here. Without `token` the API has no authentication: bind to localhost.
+It then refuses a non-loopback Host (DNS rebinding) or a non-loopback Origin (cross-site pages).
 With `token`, every /v1 and /healthz request needs `Authorization: Bearer <token>`.
 
 `GET /` is a small web console (also installable on a phone as a PWA): live recent decisions and a
@@ -17,6 +18,7 @@ import time
 from collections import deque
 from importlib.resources import files
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +31,7 @@ from .policy.conformal import ConformalPolicy, ThresholdPolicy
 from .questions import QuestionSet
 from .schema import HookInput
 
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
 log = logging.getLogger(__name__)
 
 
@@ -67,8 +70,12 @@ def create_app(
     @app.middleware("http")
     async def auth(request: Request, call_next):
         # Without a token, only loopback Host headers: blocks DNS-rebinding pages reading /v1/recent.
-        if not token and request.url.hostname not in ("127.0.0.1", "localhost", "::1"):
+        if not token and request.url.hostname not in LOOPBACK:
             return JSONResponse({"detail": "non-loopback Host; start with --token"}, status_code=403)
+        # ...and no cross-site Origin: blocks other pages posting to 127.0.0.1 (CSRF). The hook sends none.
+        origin = request.headers.get("origin")
+        if not token and origin is not None and urlsplit(origin).hostname not in LOOPBACK:
+            return JSONResponse({"detail": "cross-site Origin; start with --token"}, status_code=403)
         if token and request.url.path.startswith(("/v1/", "/healthz")):
             sent = request.headers.get("authorization", "")
             if not hmac.compare_digest(sent.encode(), f"Bearer {token}".encode()):
