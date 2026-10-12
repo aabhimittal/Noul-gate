@@ -27,12 +27,20 @@ def predicted_class(answers: Answers) -> str:
     return max(probs, key=probs.get) if probs else "unknown"
 
 
+# Bump when the feature vector changes: weights trained on another version cannot be reused.
+FEATURE_VERSION = 2  # v2 added secret_in_args and tainted_egress
+FLAG_NAMES = ("untrusted_only", "secret_in_args", "tainted_egress")
+
+
 def feature_names(classes: list[str]) -> list[str]:
     harm = [c for c in classes if c != "benign"]
-    return ["not_benign", "not_user_requested", "severity", *[f"p_{c}" for c in harm], "untrusted_only"]
+    return ["not_benign", "not_user_requested", "severity", *[f"p_{c}" for c in harm], *FLAG_NAMES]
 
 
-def features(answers: Answers, classes: list[str], untrusted_only: bool) -> list[float]:
+def features(answers: Answers, classes: list[str], flags: dict[str, bool] | bool) -> list[float]:
+    """`flags` is GateState.flags; a bare bool is accepted as untrusted_only (older callers)."""
+    if isinstance(flags, bool):
+        flags = {"untrusted_only": flags}
     probs = risk_probs(answers)
     not_benign = 1.0 - probs.get("benign", 0.0)
     ur = answers.get("user_requested", {}).get("noul")
@@ -48,7 +56,7 @@ def features(answers: Answers, classes: list[str], untrusted_only: bool) -> list
         1.0 - float(ur) if ur is not None else 0.5,
         sev_norm,
         *[float(probs.get(c, 0.0)) for c in harm],
-        1.0 if untrusted_only else 0.0,
+        *[1.0 if flags.get(name) else 0.0 for name in FLAG_NAMES],
     ]
 
 
@@ -78,8 +86,8 @@ class Combiner:
             return np.clip(X[:, 0], 0.0, 1.0)
         return _sigmoid(X @ np.asarray(self.weights) + self.bias)
 
-    def score(self, answers: Answers, untrusted_only: bool) -> float:
-        return float(self.score_vec(np.array([features(answers, self.classes, untrusted_only)]))[0])
+    def score(self, answers: Answers, flags: dict[str, bool] | bool) -> float:
+        return float(self.score_vec(np.array([features(answers, self.classes, flags)]))[0])
 
     def fit(self, X: np.ndarray, y: np.ndarray, iters: int = 50) -> Combiner:
         """IRLS (Newton) for L2-regularised logistic regression; the intercept is not penalised."""
@@ -111,10 +119,17 @@ class Combiner:
             "bias": self.bias,
             "l2": self.l2,
             "n_fit": self.n_fit,
+            "feature_version": FEATURE_VERSION,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Combiner:
+        version = d.get("feature_version", 1)
+        if d.get("weights") is not None and version != FEATURE_VERSION:
+            raise ValueError(
+                f"this policy's combiner was trained on feature version {version}, but this noulgate uses "
+                f"version {FEATURE_VERSION}; recalibrate with `noulgate calibrate`"
+            )
         return cls(
             classes=d["classes"],
             weights=d.get("weights"),

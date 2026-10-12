@@ -6,7 +6,13 @@ from .base import DecisionBackend
 
 
 def get_backend(name: str, **kwargs) -> DecisionBackend:
-    """Backends are imported lazily so optional heavy dependencies stay optional."""
+    """Backends are imported lazily so optional heavy dependencies stay optional.
+
+    A ``:raw`` suffix (e.g. ``d1-3b:raw``) turns off model-state hardening, to measure what it buys."""
+    if name.endswith(":raw"):
+        name = name[: -len(":raw")]
+        if name in {"d1", "d1-3b", "jev", "llm", "haiku"}:
+            kwargs["harden"] = False
     if name in {"d1", "d1-3b"}:
         from .d1 import D1Backend
 

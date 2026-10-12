@@ -38,12 +38,14 @@ class D1Backend(DecisionBackend):
         compile: bool = False,
         budget_chars: int = 6000,
         dtype: str | None = None,
+        harden: bool = True,
     ):
         self.model_id = model_id
         self.revision = revision or os.environ.get("NOULGATE_D1_REVISION", PINNED_REVISION)
         self.device = device
         self.compile = compile
         self.budget_chars = budget_chars
+        self.harden = harden
         # The model card uses float32 on CPU. We default to bfloat16 where the CPU supports it natively.
         # Calibrate with the same dtype you deploy: answers shift slightly between precisions.
         self.dtype = dtype or os.environ.get("NOULGATE_D1_DTYPE")
@@ -68,7 +70,8 @@ class D1Backend(DecisionBackend):
         if self.compile and device == "cuda":
             model.compile(mode="reduce-overhead")
         self.device, self._model = device, model
-        self.name = f"d1-3b[{device},{name}]"
+        # The model input differs with hardening, so cached answers must not be shared across it.
+        self.name = f"d1-3b[{device},{name}]" + ("+hardened" if self.harden else "")
         return model
 
     def warmup(self, questions: QuestionSet) -> None:
@@ -78,6 +81,6 @@ class D1Backend(DecisionBackend):
     def decide_batch(self, states: list[GateState], questions: QuestionSet) -> list[Answers]:
         model = self._load()
         qs = questions.to_d1()
-        requests = [(s.to_model_state(self.budget_chars), qs) for s in states]
+        requests = [(s.to_model_state(self.budget_chars, harden=self.harden), qs) for s in states]
         results = model.system_one_batch(requests) if len(requests) > 1 else [model.system_one(*requests[0])]
         return [self.finalize(r["answers"], questions) for r in results]

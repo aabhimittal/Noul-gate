@@ -1,8 +1,8 @@
 """Enforce mode: hook <-> serve contract, output shapes per the Claude Code hooks docs, fail-to-ask."""
 
 import json
+from urllib.parse import urlsplit
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -30,17 +30,17 @@ def _policy():
 
 @pytest.fixture
 def server():
+    """A `post` function that routes the hook's request into the FastAPI app in-process."""
     # p_harm = 1 - P(benign): "evil" -> 0.95 (deny), "maybe" -> 0.5 (ask), else 0.05 (allow)
     fn = lambda s: 0.05 if "evil" in str(s.args) else 0.5 if "maybe" in str(s.args) else 0.95  # noqa: E731
-    app = create_app(FakeBackend(fn), QS, _policy())
-    tc = TestClient(app)
-    transport = httpx.MockTransport(lambda req: _relay(tc, req))
-    return httpx.Client(transport=transport, base_url="http://gate")
+    tc = TestClient(create_app(FakeBackend(fn), QS, _policy()))
 
+    def post(url, body, timeout):
+        r = tc.post(urlsplit(url).path, json=body)
+        r.raise_for_status()
+        return r.json()
 
-def _relay(tc, req):
-    r = tc.request(req.method, req.url.path, content=req.content, headers=dict(req.headers))
-    return httpx.Response(r.status_code, content=r.content, headers=r.headers)
+    return post
 
 
 @pytest.mark.parametrize(
@@ -54,7 +54,7 @@ def _relay(tc, req):
 def test_enforce_mapping(tmp_path, hook_payload, server, cmd, emitted, decision):
     hook_payload["tool_input"] = {"command": cmd}
     log = AuditLog(tmp_path / "a.jsonl")
-    res = run_enforce_mode(json.dumps(hook_payload), log, server="http://gate", client=server)
+    res = run_enforce_mode(json.dumps(hook_payload), log.path, server="http://gate", post=server)
     assert res.exit_code == 0
     rec = log.read()[0]
     assert rec.decision == decision and rec.emitted == emitted and rec.mode == "enforce"
@@ -69,24 +69,20 @@ def test_enforce_mapping(tmp_path, hook_payload, server, cmd, emitted, decision)
 
 def test_grant_allow_emits_allow(tmp_path, hook_payload, server):
     res = run_enforce_mode(
-        json.dumps(hook_payload),
-        AuditLog(tmp_path / "a.jsonl"),
-        server="http://gate",
-        client=server,
-        grant_allow=True,
+        json.dumps(hook_payload), tmp_path / "a.jsonl", server="http://gate", post=server, grant_allow=True
     )
     assert json.loads(res.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
 def test_server_down_fails_to_ask(tmp_path, hook_payload):
     log = AuditLog(tmp_path / "a.jsonl")
-    res = run_enforce_mode(json.dumps(hook_payload), log, server="http://127.0.0.1:9", timeout=0.5)
+    res = run_enforce_mode(json.dumps(hook_payload), log.path, server="http://127.0.0.1:9", timeout=0.5)
     assert json.loads(res.stdout)["hookSpecificOutput"]["permissionDecision"] == "ask"
     assert log.read()[0].error
 
 
 def test_bad_input_fails_to_ask(tmp_path):
-    res = run_enforce_mode("garbage", AuditLog(tmp_path / "a.jsonl"))
+    res = run_enforce_mode("garbage", tmp_path / "a.jsonl")
     assert json.loads(res.stdout)["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 

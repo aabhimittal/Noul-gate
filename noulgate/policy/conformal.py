@@ -97,6 +97,7 @@ class ConformalPolicy:
     data_hash: str | None = None
     backend: str | None = None
     calibration_stats: dict[str, Any] = field(default_factory=dict)
+    fastpath: bool = False  # score fast-path calls 0 without the model (policy/fastpath.py)
     kind: str = "conformal"
 
     def cell_for(self, predicted: str) -> str:
@@ -130,6 +131,7 @@ class ConformalPolicy:
             "cells": {k: _json_cell(v) for k, v in self.cells.items()},
             "group_of": self.group_of,
             "calibration_stats": self.calibration_stats,
+            "fastpath": self.fastpath,
         }
         if include_id:
             d["policy_id"] = self.policy_id
@@ -151,6 +153,7 @@ class ConformalPolicy:
             data_hash=d.get("data_hash"),
             backend=d.get("backend"),
             calibration_stats=d.get("calibration_stats", {}),
+            fastpath=bool(d.get("fastpath", False)),
         )
 
 
@@ -160,6 +163,7 @@ class ThresholdPolicy:
 
     threshold: float = 0.5
     combiner: Combiner | None = None
+    fastpath: bool = False
     kind: str = "threshold"
 
     def decide(self, p: float, predicted: str) -> tuple[Decision, str]:
@@ -174,6 +178,7 @@ class ThresholdPolicy:
         return {
             "kind": self.kind,
             "threshold": self.threshold,
+            "fastpath": self.fastpath,
             "combiner": self.combiner.to_dict() if self.combiner else None,
             "policy_id": self.policy_id,
         }
@@ -196,7 +201,7 @@ def load_policy(path) -> ConformalPolicy | ThresholdPolicy:
         d = json.load(f)
     if d.get("kind") == "threshold":
         comb = Combiner.from_dict(d["combiner"]) if d.get("combiner") else None
-        return ThresholdPolicy(d["threshold"], comb)
+        return ThresholdPolicy(d["threshold"], comb, fastpath=bool(d.get("fastpath", False)))
     return ConformalPolicy.from_dict(d)
 
 
@@ -239,6 +244,16 @@ def calibrate(
     policy.calibration_stats = rates(decisions, labels)
     policy.calibration_stats["n_h"] = int(labels.sum())
     policy.calibration_stats["n_b"] = int(len(labels) - labels.sum())
+    # Reference score distributions for drift monitoring (`noulgate monitor`).
+    policy.calibration_stats["score_reference"] = {
+        name: score_quantiles(scores[mask])
+        for name, mask in (
+            ("all", np.ones(len(scores), bool)),
+            ("benign", labels == 0),
+            ("harmful", labels == 1),
+        )
+        if mask.any()
+    }
     warnings = [
         f"cell {k}: n_h={c.n_h} < {min_n_for(alpha)} so k=0 and nothing is allowed"
         for k, c in cells.items()
@@ -247,6 +262,15 @@ def calibrate(
     if warnings:
         policy.calibration_stats["warnings"] = warnings
     return policy
+
+
+REFERENCE_QUANTILES = 21  # 0%, 5%, ..., 100%
+
+
+def score_quantiles(scores) -> list[float]:
+    return [
+        float(q) for q in np.quantile(np.asarray(scores, dtype=float), np.linspace(0, 1, REFERENCE_QUANTILES))
+    ]
 
 
 def rates(decisions: list[Decision], labels) -> dict[str, float]:

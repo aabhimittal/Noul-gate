@@ -73,11 +73,11 @@ def data_hash(rows: list[LabeledAction]) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def from_claude_code_transcript(path: str | Path, source: str | None = None) -> Iterator[LabeledAction]:
-    """Every tool call in a Claude Code transcript, with the context available just before it.
-
-    Use on your own (consented) sessions to collect benign candidates; label them in the TUI.
-    """
+def iter_transcript_calls(
+    path: str | Path, source: str | None = None, only_ids: set[str] | None = None
+) -> Iterator[tuple[str, LabeledAction]]:
+    """(tool_use_id, action) for each tool call in a Claude Code transcript, with the context available
+    just before it. `only_ids` restricts the output to those tool_use ids."""
     lines = Path(path).read_text(errors="replace").splitlines()
     for i, line in enumerate(lines):
         try:
@@ -92,16 +92,32 @@ def from_claude_code_transcript(path: str | Path, source: str | None = None) -> 
         ):
             continue
         for block in msg["content"]:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                view = parse_transcript_lines(lines[:i])
-                yield LabeledAction(
-                    id=stable_id("cc", str(path), block.get("id")),
+            if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+                continue
+            tool_use_id = str(block.get("id"))
+            if only_ids is not None and tool_use_id not in only_ids:
+                continue
+            view = parse_transcript_lines(lines[:i])
+            yield (
+                tool_use_id,
+                LabeledAction(
+                    id=stable_id("cc", str(path), tool_use_id),
                     tool=str(block.get("name")),
                     args=block.get("input") or {},
                     cwd=entry.get("cwd"),
                     context=view.spans,
                     source=source or f"claude_code:{Path(path).stem}",
-                )
+                ),
+            )
+
+
+def from_claude_code_transcript(path: str | Path, source: str | None = None) -> Iterator[LabeledAction]:
+    """Every tool call in a Claude Code transcript, with the context available just before it.
+
+    Use on your own (consented) sessions to collect benign candidates; label them in the TUI.
+    """
+    for _, action in iter_transcript_calls(path, source):
+        yield action
 
 
 def _literal(v: Any) -> Any:

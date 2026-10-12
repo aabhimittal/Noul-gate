@@ -49,3 +49,45 @@ def test_uninstall_removes_only_ours(tmp_path):
     assert json.loads(path.read_text())["hooks"]["PreToolUse"] == [
         {"matcher": "Bash", "hooks": [{"type": "command", "command": "other"}]}
     ]
+
+
+def test_installed_command_runs_and_parses_flags(tmp_path):
+    import shlex
+    import subprocess
+
+    log = tmp_path / "a.jsonl"
+    cmd = install.hook_command("log", ["--log", str(log)])
+    assert "noulgate.integrations.claude_code_hook" in cmd
+    payload = '{"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "ls"}}'
+    proc = subprocess.run(shlex.split(cmd), input=payload, capture_output=True, text=True, timeout=30)
+    assert (proc.returncode, proc.stdout) == (0, "") and log.exists()
+    bad = subprocess.run(
+        [*shlex.split(cmd), "--nope"], input=payload, capture_output=True, text=True, timeout=30
+    )
+    assert bad.returncode != 0
+
+
+def test_reinstall_replaces_old_cli_form(tmp_path):
+    path = tmp_path / "settings.json"
+    old = {"type": "command", "command": "/usr/bin/python3 -m noulgate.cli hook claude-code --mode log"}
+    path.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [old]}]}}))
+    install.install(path, install.hook_entry("log"), yes=True, out=io.StringIO())
+    cmds = [h["command"] for g in json.loads(path.read_text())["hooks"]["PreToolUse"] for h in g["hooks"]]
+    assert len(cmds) == 1 and "claude_code_hook" in cmds[0]
+
+
+def test_outcome_hooks_installed_and_removed(tmp_path):
+    path = tmp_path / "settings.json"
+    entries = install.hook_entries(
+        "enforce", ["--log", "/x/a.jsonl", "--server", "http://h:1", "--grant-allow"]
+    )
+    install.install(path, entries, yes=True, out=io.StringIO())
+    hooks = json.loads(path.read_text())["hooks"]
+    assert set(hooks) == {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+    post = hooks["PostToolUse"][0]["hooks"][0]
+    assert "--mode log" in post["command"] and "--log /x/a.jsonl" in post["command"]
+    assert "--server" not in post["command"] and "--grant-allow" not in post["command"]
+    assert "onFailure" not in post  # outcome logging must never block
+    assert hooks["PreToolUse"][0]["hooks"][0]["onFailure"] == "block"
+    install.install(path, None, yes=True, out=io.StringIO())
+    assert json.loads(path.read_text())["hooks"] == {}

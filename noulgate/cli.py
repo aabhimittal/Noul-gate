@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+DEFAULT_STORE = "embedded:" + str(Path.home() / ".noulgate" / "helix")
+
 
 def _questions(args):
     from .questions import load_questions
@@ -51,7 +53,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
             extra += ["--server", args.server]
         if args.grant_allow:
             extra += ["--grant-allow"]
-    entry = None if args.uninstall else install.hook_entry(args.mode, extra)
+    entry = None if args.uninstall else install.hook_entries(args.mode, extra, outcomes=not args.no_outcomes)
     install.install(path, entry, yes=args.yes)
     return 0
 
@@ -82,7 +84,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             "noulgate: no --policy given; using the UNCALIBRATED 0.5 threshold (no guarantee).",
             file=sys.stderr,
         )
-    app = create_app(_backend(args.backend), _questions(args), policy, warmup=not args.no_warmup)
+    store = None
+    if args.store:
+        from .store.helix import HelixStore
+
+        store = HelixStore(args.store)
+    app = create_app(_backend(args.backend), _questions(args), policy, warmup=not args.no_warmup, store=store)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
@@ -108,9 +115,12 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
         )
         return 2
     backend = _backend(args.backend)
-    cal = score_rows(rows, backend, qs, args.cache)
-    fit = score_rows(fit_rows, backend, qs, args.cache) if fit_rows else []
-    policy = fit_and_calibrate(fit, cal, qs, args.alpha, args.beta, per_class=not args.global_only)
+    fast = not args.no_fastpath
+    cal = score_rows(rows, backend, qs, args.cache, fastpath=fast)
+    fit = score_rows(fit_rows, backend, qs, args.cache, fastpath=fast) if fit_rows else []
+    policy = fit_and_calibrate(
+        fit, cal, qs, args.alpha, args.beta, per_class=not args.global_only, fastpath=fast
+    )
     policy.backend, policy.data_hash = backend.name, data_hash(rows)
     Path(args.out).write_text(json.dumps(policy.to_dict(), indent=2) + "\n")
     s = policy.calibration_stats
@@ -137,7 +147,9 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     rows = [r for r in read_jsonl(args.data) if r.label]
     policy = load_policy(args.policy)
     backend_name = args.backend or getattr(policy, "backend", None) or "rules"
-    scored = score_rows(rows, _backend(backend_name), qs, args.cache)
+    scored = score_rows(
+        rows, _backend(backend_name), qs, args.cache, fastpath=getattr(policy, "fastpath", False)
+    )
     metrics = evaluate_policy(policy, scored, qs)
     if getattr(policy, "alpha", None) is not None:
         from .policy.conformal import false_allow_upper
@@ -174,9 +186,14 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     results, latency = {}, {}
     for name in args.backends.split(","):
         backend = _backend(name)
-        cache = Path(args.cache_dir) / f"{name}.jsonl" if args.cache_dir else None
-        scored = score_rows(rows, backend, qs, cache)
-        results[backend.name] = repeated_splits(scored, by_id, qs, alphas, args.beta, n_splits=args.splits)
+        cache = Path(args.cache_dir) / f"{name.split(':')[0]}.jsonl" if args.cache_dir else None
+        fast = not args.no_fastpath
+        scored = score_rows(rows, backend, qs, cache, fastpath=fast)
+        results[backend.name] = repeated_splits(
+            scored, by_id, qs, alphas, args.beta, n_splits=args.splits, fastpath=fast
+        )
+        n_fast = sum(bool(s.fastpath) for s in scored)
+        print(f"{backend.name}: fast path scored {n_fast}/{len(scored)} rows without the model")
         lat = sorted(s.latency_ms for s in scored)
         latency[backend.name] = {
             "p50_ms": lat[len(lat) // 2],
@@ -281,6 +298,141 @@ def _cmd_agreement(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- feedback / monitoring
+
+
+def _records(args: argparse.Namespace) -> list[dict]:
+    """Audit records from --store (HelixDB) if given, else from the JSONL --log."""
+    if getattr(args, "store", None):
+        from .store.helix import HelixStore
+
+        store = HelixStore(args.store)
+        try:
+            return store.records()
+        finally:
+            store.close()
+    from .feedback import read_records
+
+    return read_records(args.log)
+
+
+def _cmd_store(args: argparse.Namespace) -> int:
+    from .store.helix import HelixStore
+
+    store = HelixStore(args.store)
+    try:
+        if args.action == "sync":
+            from .feedback import harvest, read_records
+
+            records = read_records(args.log)
+            stats = store.ingest(records, rebuild_provenance=not args.no_provenance)
+            answers = 0
+            for ask in harvest(records):
+                if ask.answer != "unknown":
+                    answers += store.record_answer(ask.decision["tool_use_id"], ask.answer)
+            stats["human_answers"] = answers
+            print(json.dumps({"synced": stats, "graph": store.counts()}, indent=2))
+        elif args.action == "stats":
+            print(json.dumps(store.counts(), indent=2))
+        else:
+            if args.query == "tainted-egress":
+                rows = store.tainted_egress_chains()
+            elif args.query == "injected-targets":
+                rows = store.injected_targets(min_calls=args.min_calls)
+            else:
+                if not args.session:
+                    print("--session is required for the session query", file=sys.stderr)
+                    return 2
+                rows = store.session_timeline(args.session)
+            print(json.dumps(rows, indent=2, default=str))
+    finally:
+        store.close()
+    return 0
+
+
+def _cmd_harvest(args: argparse.Namespace) -> int:
+    from .datasets import write_jsonl
+    from .feedback import harvest, summary, to_labeled
+
+    asks = harvest(_records(args))
+    print(f"asks: {summary(asks)}")
+    rows = to_labeled(asks, auto_label=args.auto_label)
+    if args.out:
+        n = write_jsonl(args.out, rows)
+        labeled = sum(r.label is not None for r in rows)
+        print(f"wrote {n} rows ({labeled} labeled) to {args.out}; review them with `noulgate label`")
+    return 0
+
+
+def _cmd_monitor(args: argparse.Namespace) -> int:
+    from .monitor import monitor
+
+    policy = json.loads(Path(args.policy).read_text()) if args.policy else None
+    rep = monitor(_records(args), policy, window=args.window, policy_id=args.policy_id).to_dict()
+    o = rep["overall"]
+    print(
+        f"{rep['n_decisions']} decisions: allow {o['allow_rate']:.3f}  ask {o['ask_rate']:.3f}  "
+        f"deny {o['deny_rate']:.3f}"
+    )
+    print(f"asks answered: {rep['asks']}  approval rate: {rep['ask_approval_rate']}")
+    print(
+        "drift: "
+        + ", ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in rep["drift"].items())
+    )
+    for a in rep["alerts"]:
+        print(f"ALERT: {a}")
+    for n in rep["notes"]:
+        print(f"note: {n}")
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(rep, indent=2, default=str) + "\n")
+    if args.report:
+        from .report import monitor_report
+
+        Path(args.report).write_text(monitor_report(rep))
+        print(f"wrote {args.report}")
+    return 1 if rep["alert"] else 0
+
+
+def _cmd_attack(args: argparse.Namespace) -> int:
+    from .adversarial import run_attack
+    from .datasets import read_jsonl
+    from .report import attack_report
+
+    qs = _questions(args)
+    rows = [r for r in read_jsonl(args.data) if r.label]
+    results = []
+    for name in args.backends.split(","):
+        cache = Path(args.cache_dir) / f"{name.split(':')[0]}.jsonl" if args.cache_dir else None
+        res = run_attack(
+            rows,
+            _backend(name),
+            qs,
+            alpha=args.alpha,
+            beta=args.beta,
+            cache=cache,
+            seed=args.seed,
+            max_harmful=args.max_harmful,
+            fastpath=not args.no_fastpath,
+        )
+        results.append(res)
+        print(
+            f"{res['backend']}: clean false-allow {res['false_allow_clean']:.3f} on {res['n_harmful_attacked']} rows"
+        )
+        for t, m in res["transforms"].items():
+            if m.get("n"):
+                print(
+                    f"  {t:22s} n={m['n']:3d}  Δp={m['delta_p_mean']:+.3f}  flip={m['flip_rate']:.3f}  "
+                    f"false-allow {m['false_allow_clean']:.3f} -> {m['false_allow_attacked']:.3f}"
+                )
+    meta = {"data": args.data, "alpha": args.alpha, "seed": args.seed, "synthetic": _is_synthetic(rows)}
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps({"meta": meta, "results": results}, indent=2) + "\n")
+    if args.report:
+        Path(args.report).write_text(attack_report(results, meta))
+        print(f"wrote {args.report}")
+    return 0
+
+
 # --------------------------------------------------------------------------- MCP proxy
 
 
@@ -327,6 +479,11 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--server")
     i.add_argument("--grant-allow", action="store_true")
     i.add_argument("--uninstall", action="store_true")
+    i.add_argument(
+        "--no-outcomes",
+        action="store_true",
+        help="don't install the PostToolUse/PostToolUseFailure outcome hooks (used by `harvest`)",
+    )
     i.add_argument("-y", "--yes", action="store_true", help="write without asking")
     i.set_defaults(func=_cmd_install)
 
@@ -341,6 +498,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=7701)
     s.add_argument("--no-warmup", action="store_true")
+    s.add_argument(
+        "--store", help="also record decisions in HelixDB: memory | embedded:<dir> | http://host:6969"
+    )
     s.set_defaults(func=_cmd_serve)
 
     c = sub.add_parser("calibrate", help="set conformal thresholds from labeled calibration data")
@@ -354,6 +514,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--fit-fraction", type=float, default=0.0, help="hold out this share of --data to fit the combiner"
     )
     c.add_argument("--global-only", action="store_true", help="one threshold pair instead of per risk class")
+    c.add_argument(
+        "--no-fastpath", action="store_true", help="run the model on every call (see policy/fastpath.py)"
+    )
     c.add_argument("--cache", help="JSONL cache of backend answers")
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--questions")
@@ -376,6 +539,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--splits", type=int, default=20)
     b.add_argument("--cache-dir")
     b.add_argument("--latency-runs", type=int, default=0)
+    b.add_argument("--no-fastpath", action="store_true")
     b.add_argument("--report")
     b.add_argument("--json-out")
     b.add_argument("--questions")
@@ -416,6 +580,67 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_argument("--merge-out")
     ag.add_argument("--policy", choices=["unanimous", "majority"], default="unanimous")
     ag.set_defaults(func=_cmd_agreement)
+
+    at = sub.add_parser(
+        "attack", help="adversarial robustness: attack harmful rows, measure how far p(x) drops"
+    )
+    at.add_argument("--data", required=True)
+    at.add_argument("--backends", default="rules")
+    at.add_argument("--alpha", type=float, default=0.05)
+    at.add_argument("--beta", type=float, default=0.10)
+    at.add_argument("--seed", type=int, default=0)
+    at.add_argument("--max-harmful", type=int, help="cap the attacked harmful rows (model time)")
+    at.add_argument("--cache-dir")
+    at.add_argument("--no-fastpath", action="store_true")
+    at.add_argument("--report")
+    at.add_argument("--json-out")
+    at.add_argument("--questions")
+    at.set_defaults(func=_cmd_attack)
+
+    hv = sub.add_parser(
+        "harvest", help="turn answered 'ask' prompts from the audit log into labeled candidates"
+    )
+    hv.add_argument("--log", default=str(Path.home() / ".noulgate" / "audit.jsonl"))
+    hv.add_argument("--out", help="write LabeledAction JSONL here")
+    hv.add_argument(
+        "--auto-label",
+        action="store_true",
+        help="approved -> benign, rejected -> harmful (otherwise answers are only hints)",
+    )
+    hv.add_argument("--store", help="read decisions from HelixDB instead of --log")
+    hv.set_defaults(func=_cmd_harvest)
+
+    st = sub.add_parser(
+        "store", help="HelixDB graph store: sync the audit log, query provenance/taint graphs"
+    )
+    st_sub = st.add_subparsers(dest="action", required=True)
+    ss = st_sub.add_parser(
+        "sync", help="ingest an audit log (idempotent), rebuilding provenance from transcripts"
+    )
+    ss.add_argument("--log", default=str(Path.home() / ".noulgate" / "audit.jsonl"))
+    ss.add_argument("--no-provenance", action="store_true", help="skip reading transcripts")
+    sq = st_sub.add_parser("query", help="canned graph queries")
+    sq.add_argument("query", choices=["tainted-egress", "injected-targets", "session"])
+    sq.add_argument("--session")
+    sq.add_argument("--min-calls", type=int, default=1)
+    sst = st_sub.add_parser("stats", help="node counts")
+    for p_ in (ss, sq, sst):
+        p_.add_argument(
+            "--store",
+            default=DEFAULT_STORE,
+            help="memory | embedded:<dir> | http://host:6969 (default: ~/.noulgate/helix)",
+        )
+    st.set_defaults(func=_cmd_store)
+
+    mo = sub.add_parser("monitor", help="decision rates, ask outcomes and score drift; exit 1 on alert")
+    mo.add_argument("--log", default=str(Path.home() / ".noulgate" / "audit.jsonl"))
+    mo.add_argument("--policy", help="policy.json (enables drift checks and calibration comparisons)")
+    mo.add_argument("--policy-id", help="only decisions made by this policy (default: the --policy's id)")
+    mo.add_argument("--window", default="1d", help="bucket size: 30m, 6h, 1d ...")
+    mo.add_argument("--report")
+    mo.add_argument("--json-out")
+    mo.add_argument("--store", help="read decisions from HelixDB instead of --log")
+    mo.set_defaults(func=_cmd_monitor)
 
     m = sub.add_parser("mcp-proxy", help="gate every tools/call of an upstream stdio MCP server")
     m.add_argument("--server", help="use a running `noulgate serve` at this URL")

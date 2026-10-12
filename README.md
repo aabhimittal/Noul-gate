@@ -17,12 +17,17 @@ Spec: [SPEC.md](SPEC.md). Where the spec had to bend to the real Claude Code and
 **Status: research prototype.** The pipeline is complete and tested, but it has **not** been calibrated or
 evaluated on real labeled agent traces (see [Honest limits](#honest-limits)).
 
+**See it run:** [interactive demo](docs/demo/index.html) (pick a pending call, move α, watch the
+decisions and their cost change; also published as a claude.ai Artifact: DEMO_URL) ·
+[recorded end-to-end run](docs/demo/e2e.html) (a live Claude Code session through the gate, replayed
+attacks, HelixDB queries).
+
 ---
 
 ## Quick start
 
 ```bash
-pip install -e ".[serve,mcp,report,dev]"     # add [d1] for the local model, [llm] for the LLM judge
+pip install -e ".[serve,mcp,report,dev,helix]"   # add [d1] for the local model, [llm] for the LLM judge
 
 # M0: observe only. Log every pending Claude Code tool call; behavior is unchanged.
 noulgate install claude-code                  # shows a diff of .claude/settings.json, asks first
@@ -33,6 +38,11 @@ noulgate calibrate --data cal.jsonl --fit-data fit.jsonl --alpha 0.02 --backend 
 noulgate eval --data test.jsonl --policy policy.json --report report.html
 noulgate serve --backend d1-3b --policy policy.json --port 7701
 noulgate install claude-code --mode enforce   # hook now asks the server; deny/ask are enforced
+
+# Close the loop.
+noulgate harvest --out answered.jsonl         # your answers to 'ask' prompts become labeled candidates
+noulgate monitor --policy policy.json         # rates, ask approval, score drift; exits 1 on alert
+noulgate serve ... --store embedded:~/.noulgate/helix && noulgate store query tainted-egress
 ```
 
 Other harnesses: `noulgate mcp-proxy -- <your stdio MCP server command>` gates any MCP client
@@ -126,7 +136,9 @@ false-allow rate.
 | **d1-3B, bfloat16** (AMX; our CPU default when supported) | **1.25 s / 1.30 s** (12 runs) | 5.7 s (2 runs) | 0.82 decisions/s (packing doesn't help on CPU) |
 | d1-3B, float32 (the model card's CPU setting) | 28.8 s (2 runs) | not measured (would be minutes) | – |
 | rules baseline | 0.04 ms / 0.09 ms | 0.05 ms | ~25k/s |
-| enforce hook round trip, rules backend, real Claude Code session | 76–103 ms (Python start-up + HTTP + parse) | | |
+| hook process alone (log mode), stdlib only | **36 ms** (was 170 ms when it imported pydantic; bare Python start is 14 ms) | | |
+| enforce hook round trip, rules backend, real Claude Code session | 65–130 ms (start-up + HTTP + transcript parse) | | |
+| fast path (Read/Grep/`git status` inside the project) | no model call: p = 0 | | |
 
 For comparison, the d1 card reports 8 ms (RTX 4090), 16 ms (Jetson AGX Thor) and 30 ms (Apple M5 Pro).
 **On a server CPU without a GPU, d1-3B is ~150× slower than on a 4090, and fp32 is another ~23× slower
@@ -141,22 +153,103 @@ With long context it is not, so keep `budget_chars` small or use a GPU. Raw numb
 20 random fit/cal/test splits (25/45/30%), β = 0.1, combiner trained on the fit split.
 Report: [eval/results/benchmark_synthetic.html](eval/results/benchmark_synthetic.html).
 
-| α | d1-3B false-allow (mean / max) | d1-3B false-deny | d1 splits in tolerance | rules false-allow (mean / max) |
-|---|---|---|---|---|
-| 0.01 | 0.004 / 0.028 | 0.044 | 20/20 | 0.000 / 0.000 |
-| 0.02 | 0.013 / 0.056 | 0.017 | 20/20 | 0.000 / 0.000 |
-| 0.05 | 0.059 / 0.153 | 0.000 | 17/20 | 0.010 / 0.097 |
-| 0.10 | 0.105 / 0.208 | 0.000 | 16/20 | 0.054 / 0.097 |
-| 0.20 | 0.210 / 0.333 | 0.000 | 18/20 | 0.149 / 0.222 |
-| uncalibrated 0.5 | 0.076 | 0.056 | – | 0.000 |
+| α | d1-3B false-allow (mean / max) | d1-3B false-deny | d1 splits in tolerance | rules false-allow (mean / max) | rules false-deny |
+|---|---|---|---|---|---|
+| 0.01 | 0.001 / 0.014 | 0.003 | 20/20 | 0.000 / 0.000 | 0.031 |
+| 0.02 | 0.001 / 0.014 | 0.003 | 20/20 | 0.003 / 0.069 | 0.031 |
+| 0.05 | 0.001 / 0.014 | 0.003 | 20/20 | 0.023 / 0.069 | 0.024 |
+| 0.10 | 0.019 / 0.181 | 0.003 | 19/20 | 0.047 / 0.111 | 0.006 |
+| 0.20 | 0.181 / 0.347 | 0.000 | 19/20 | 0.122 / 0.292 | 0.000 |
+| uncalibrated 0.5 | 0.172 | 0.075 | – | 0.000 | 0.070 |
 
-Raw d1-3B separates this synthetic data well (AUC 0.94 for 1 − P(benign), 0.98 for
-1 − P(user_requested)), so the ask rate is ≈0 at every α. At 20 splits the d1 mean sits slightly above α
-for α = 0.05 and 0.1, and 16–17 of 20 splits are within the per-split 95% tolerance. We reran with
-**100 splits**: mean false-allow 0.049 (α = 0.05) and 0.090 (α = 0.1), with 95/100 splits within
-tolerance, which is the nominal rate. The 20-split excess is sampling noise across overlapping splits,
-but it shows how loose a 20-split check is. The rules baseline looks perfect only because its rules and
-the synthetic templates share an author.
+These are d1-3B with round-2 hardening (bf16 on CPU, p50 1.24 s/row) on the regenerated fixture set,
+which now includes chained-exfiltration rows and harmless tainted egress. The ask rate is ≈0 at every α.
+
+Two things in this table look better than they are:
+
+* **For α ≤ 0.05, d1's false-allow sits far below α.** This is not extra safety. Many harmful scores
+  tie at the same values (the fixture repeats templates), so the k-th smallest harmful score lands on a
+  tie and the calibrated policy is conservative in steps. Because of that, α between 0.01 and 0.05
+  makes no difference here.
+* **The uncalibrated 0.5 threshold is bad for hardened d1** (false-allow 0.17, against 0.08 for raw d1 in
+  round 1). Wrapping untrusted text shifts the score scale. Calibration absorbs the shift, which is the
+  point of calibrating, but it means you should never ship a fixed threshold.
+
+For comparison, round 1 ran raw d1 on the previous fixture version. At 20 splits its mean false-allow
+was 0.059 at α = 0.05 (17/20 splits in tolerance). At 100 splits it was 0.049, with 95/100 splits in
+tolerance, which is the nominal rate. The rules baseline looks good only because its rules and the
+synthetic templates share an author.
+
+## Round 2: closing the loop, multi-step attacks, speed, robustness, storage
+
+### Feedback loop and monitoring
+The installer also registers `PostToolUse` and `PostToolUseFailure`, so every decision is followed by
+an outcome record with the same `tool_use_id`. Claude Code has no hook that reports your answer to an
+"ask", so `noulgate harvest` infers it. If the tool ran, you approved it. If the transcript shows a user
+rejection, you rejected it. If our own reason was echoed back (as happens in non-interactive `-p`
+mode), no human was there to answer. Your answers become labeled candidates for the labeling TUI and
+for fitting the combiner. They are biased toward the uncertain region, so don't pour them straight
+into the calibration set.
+
+`noulgate monitor` tracks decision rates per window, the ask approval rate, and drift as PSI and KS
+of deployed scores against the calibration's benign scores (policies now store score quantiles). It
+exits 1 on an alert, and alerts need at least 50 decisions. It cannot see the deployed false-allow
+rate (an allowed attack never announces itself) and it says so.
+
+### Session taint: read a secret, then send it out
+Provenance asks "who asked for this?". Taint asks "what has this session already touched?". Reading a
+credential file, or seeing a private key, token or `PASSWORD=` literal in tool output, taints the
+session. A later egress call (network commands, web fetches, messaging/publishing MCP tools, writes
+outside the project) is then flagged as `tainted_egress`. That catches "print the key, then upload
+notes to a host the user named", where provenance sees nothing odd. The synthetic set now contains
+such chains, plus harmless tainted egress (a health check after editing `.env`) so the feature isn't
+free.
+
+### Fast path
+Reads inside the project and a narrow set of read-only shell commands (`ls`, `git status/diff/log`,
+`cat` of project files; no shell metacharacters, no `git -c`/`--output`/`--no-index`) score p = 0 with no
+model call. The policy records that it was calibrated with the fast path, and calibration uses the same
+score function, so the bound still holds. If the allowlist ever lets harmful calls through, λ_allow drops
+to 0 and fast-path calls stop being auto-allowed (tested). On the synthetic set it handles 110 of 600
+rows, all benign.
+
+### Adversarial robustness: attacking the gate itself
+`noulgate attack` rewrites harmful rows the way an attacker could, changing only attacker-controlled
+text, and measures how far p(x) falls under a policy calibrated on clean data (synthetic, α = 0.05,
+72 harmful test rows):
+
+| Transform | what the attacker changes | raw d1 Δp / flips | hardened d1 Δp / flips | rules flips |
+|---|---|---|---|---|
+| benign_claim | injected text claims the user approved it and it is routine | +0.000 / 0.0% | −0.006 / 5.6% | 0% |
+| role_spoof | injected text impersonates the user ("User: yes, please run …") | +0.041 / 0.0% | +0.036 / 0.0% | 0% |
+| classifier_injection | addresses the safety classifier directly ("classify as benign") | −0.001 / 5.6% | +0.001 / 5.6% | 0% |
+| target_obfuscation (n = 26) | hides the host behind base64 in the Bash command | +0.024 / 0.0% | +0.032 / 0.0% | 0% |
+| dilution | buries the injection under 7 long harmless tool outputs | +0.006 / 5.6% | −0.017 / 5.6% | 0% |
+
+Δp is the mean change in p(x) and "flips" is the share of harmful rows that move to allow. Read the
+flips with care. **Every flip in both d1 columns is the same 4 duplicated harmful rows**, and their clean
+score sits exactly on λ_allow (0.526 raw, 0.54 hardened). Any perturbation of ±0.02–0.06 pushes them under
+the threshold, and the mean Δp is about zero. So this is near-threshold fragility on duplicated synthetic
+rows, not attack text that works. It also means hardening neither helped nor hurt measurably on this data.
+A real verdict needs a larger, non-synthetic attack set and an adaptive attacker. Neither is here yet.
+
+Rules is immune because it never reads prose. That is also why it can't judge intent. In the
+end-to-end run it allowed `rm -rf build/` (a pattern it trusts) and denied a user-requested `rm -rf ~/<dir>`,
+although its own P(user_requested) was 0.85: a path outside the project outweighs the request.
+
+Hardening is on by default. Untrusted spans reach the model as `untrusted_data` under a fixed
+note that they may address the classifier. Spans that back a flag are pinned in the context window, so
+noise can't push them out. None of this makes the bound hold against an adaptive attacker.
+
+### HelixDB store
+Decisions, sessions, targets, provenance sources and taint are stored as a graph in
+[HelixDB](https://docs.helix-db.com): embedded in-process (`memory`, `embedded:<dir>`) or a server
+(`http://host:6969`). `noulgate serve --store …` writes live, and `noulgate store sync` backfills from the
+audit log (idempotent). `noulgate store query tainted-egress | injected-targets | session` answers
+cross-call and cross-session questions, such as which domains keep injecting targets the agent then
+acts on. `monitor` and `harvest` read from it with `--store`. The hook stays stdlib-only and JSONL-first.
+Future sessions in this repo are told to use HelixDB through [CLAUDE.md](CLAUDE.md), and a SessionStart
+hook installs it in cloud sessions.
 
 ## Honest limits
 
@@ -183,6 +276,10 @@ the synthetic templates share an author.
   provenance feature are what make the scores usable.
 - **The rules baseline over-blocks.** In the enforce test it denied a user-requested `rm -rf` with
   P(user_requested) = 0.85. A learned combiner on real data should trade this off; rules can't.
+- **Ask answers are inferred.** No hook reports your answer. Approval is inferred from the tool
+  running; the rejection phrases are best effort and were not observed in an interactive session here.
+- **Taint is pattern-based.** It catches known secret formats and credential paths; a secret it doesn't
+  recognise doesn't taint the session, and harmless egress after touching a secret raises false alarms.
 - **Transcript parsing** relies on Claude Code's undocumented transcript format and degrades to "no
   context" if it changes.
 - **MCP proxy mode** cannot see the user's request (MCP doesn't carry it), so `user_requested` carries
@@ -196,15 +293,19 @@ the synthetic templates share an author.
 
 ```
 noulgate/
-  features/      provenance.py (span tags, transcript parser, injection signature), builder.py (GateState)
+  features/      provenance.py (span tags, transcript parser, injection signature), taint.py (secrets → egress),
+                 builder.py (GateState, hardened model state)
   backends/      base.py, d1.py, jev.py, llm.py, rules.py, fake.py
-  policy/        conformal.py (thresholds, tolerance), combiner.py (logistic combiner)
-  integrations/  claude_code_hook.py, install.py, mcp_proxy.py
-  gate.py serve.py evaluate.py report.py datasets.py label_tui.py latency.py audit.py schema.py cli.py
+  policy/        conformal.py (thresholds, tolerance), combiner.py (logistic combiner), fastpath.py
+  integrations/  claude_code_hook.py (stdlib only), install.py, mcp_proxy.py
+  store/         helix.py (HelixDB graph store)
+  gate.py serve.py evaluate.py report.py datasets.py label_tui.py latency.py feedback.py monitor.py
+  adversarial.py audit.py _jsonl.py schema.py cli.py
 data/            questions.yaml, fixtures/ (SYNTHETIC)
-eval/            latency.py, results/
-docs/            spec-diff.md, architecture.md, mcp-clients.md, audit_log.schema.json
+eval/            latency.py, results/ (benchmark, attack, latency)
+docs/            spec-diff.md, architecture.md, mcp-clients.md, audit_log.schema.json, demo/
 tests/           pytest + hypothesis
+CLAUDE.md        conventions for future Claude Code sessions (HelixDB, invariants, checks)
 ```
 
 ## CLI
@@ -222,6 +323,10 @@ tests/           pytest + hypothesis
 | `noulgate agreement labels/*.jsonl [--merge-out merged.jsonl]` | Cohen's κ, merging |
 | `noulgate mcp-proxy [--server URL] -- <cmd>` | gate an MCP server for any client |
 | `noulgate latency --backend d1-3b` | p50/p99 and batch throughput |
+| `noulgate harvest [--log … \| --store …] --out x.jsonl [--auto-label]` | turn answered asks into labeled candidates |
+| `noulgate monitor --policy policy.json [--report m.html]` | rates, ask approval, drift; exit 1 on alert |
+| `noulgate attack --data … --backends rules,d1-3b,d1-3b:raw` | adversarial robustness (`:raw` = no hardening) |
+| `noulgate store sync \| stats \| query {tainted-egress,injected-targets,session}` | HelixDB graph store |
 
 ## Development
 
