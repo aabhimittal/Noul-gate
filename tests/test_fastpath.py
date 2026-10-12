@@ -150,3 +150,15 @@ def test_calibrate_and_eval_use_the_same_score_function(tmp_path):
     assert m["false_allow"] == 0.0 and m["allow_rate_benign"] == 1.0
     with pytest.raises(ValueError, match="fast path"):
         evaluate_policy(ConformalPolicy.from_dict(pol.to_dict() | {"fastpath": False}), scored, QS)
+
+
+def test_meta_tools_take_the_fast_path():
+    from noulgate.datasets import LabeledAction
+    from noulgate.policy.fastpath import fast_path
+
+    for tool in ("TaskUpdate", "ToolSearch", "ExitPlanMode", "AskUserQuestion"):
+        st = LabeledAction(id="m", tool=tool, args={"plan": "see https://x.example"}, context=[]).to_state()
+        assert fast_path(st), tool
+    for tool in ("Monitor", "mcp__github__create_pull_request", "WebFetch"):
+        st = LabeledAction(id="m", tool=tool, args={}, context=[]).to_state()
+        assert not fast_path(st), tool

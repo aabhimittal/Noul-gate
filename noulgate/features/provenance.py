@@ -171,12 +171,34 @@ _IP = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _HOST = re.compile(
     r"\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|ai|dev|app|xyz|ru|cn|co|me|sh|site|info|biz)\b", re.I
 )
-_PATH = re.compile(r"(?:~|\.{1,2})?/[\w.@%+-]+(?:/[\w.@%+-]+)*")
+# A path starts at a token boundary: "claude/noulgate-build" is a branch name, not the path "/noulgate-build".
+_PATH = re.compile(r"(?<![\w.%+{,-])(?:~|\.{1,2})?/[\w.@%+-]+(?:/[\w.@%+-]+)*")
 _COMMON_PATHS = {"/dev/null", "/tmp", "/bin/sh", "/bin/bash", "/usr/bin/env"}
+# Tools whose payload is data being written: only the destination is a target. (Measured on real sessions:
+# file contents full of paths and URLs made most benign Write calls look like injected actions.)
+_WRITE_TOOLS = {
+    "Write": ("file_path",),
+    "Edit": ("file_path",),
+    "MultiEdit": ("file_path",),
+    "NotebookEdit": ("notebook_path",),
+}
+# `cat > f <<'EOF' ... EOF` (or tee): the body is file content. Heredocs fed to an interpreter stay, they run.
+_WRITTEN_HEREDOC = re.compile(r"(\b(?:cat|tee)\b[^\n<]*<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n)(.*?)(\n\2\b)", re.S)
+
+
+def _strip_written_heredocs(command: str) -> str:
+    return _WRITTEN_HEREDOC.sub(lambda m: m.group(1) + m.group(4).lstrip("\n"), command)
 
 
 def salient_tokens(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
-    """URLs, hosts, e-mail addresses, IPs and paths in the action's arguments."""
+    """URLs, hosts, e-mail addresses, IPs and paths in the action's arguments.
+
+    Written content is skipped (Write/Edit bodies, heredoc bodies piped to cat/tee): it is data, not
+    something the call acts on."""
+    if isinstance(tool_input, dict) and tool_name in _WRITE_TOOLS:
+        tool_input = {k: tool_input[k] for k in _WRITE_TOOLS[tool_name] if k in tool_input}
+    elif isinstance(tool_input, dict) and tool_name == "Bash" and isinstance(tool_input.get("command"), str):
+        tool_input = {**tool_input, "command": _strip_written_heredocs(tool_input["command"])}
     text = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
     text = text.replace("\\/", "/")
     found: list[str] = []

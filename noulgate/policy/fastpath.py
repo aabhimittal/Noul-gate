@@ -105,10 +105,30 @@ def _bash(command: str, cwd: str) -> str | None:
     return None
 
 
+# Claude Code's own bookkeeping tools: they change nothing outside the conversation (a task list, a tool
+# search, a question or plan shown to the user). Monitor, Skill and anything MCP are deliberately absent.
+META_TOOLS = frozenset(
+    {
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskGet",
+        "TaskList",
+        "TodoWrite",
+        "ToolSearch",
+        "ExitPlanMode",
+        "EnterPlanMode",
+        "AskUserQuestion",
+        "ReadNotifications",
+    }
+)
+
+
 def fast_path(state: GateState) -> str | None:
     """A short reason if this call is trivially safe, else None."""
     if state.secret_in_args or state.tainted_egress:
         return None
+    if state.tool in META_TOOLS:
+        return f"{state.tool}: conversation-only tool"
     if state.tool in READ_TOOLS:
         return _read_tool(state)
     if state.tool == "Bash" and state.cwd:

@@ -28,7 +28,7 @@ def predicted_class(answers: Answers) -> str:
 
 
 # Bump when the feature vector changes: weights trained on another version cannot be reused.
-FEATURE_VERSION = 2  # v2 added secret_in_args and tainted_egress
+FEATURE_VERSION = 3  # v2 added secret_in_args and tainted_egress; v3: flags ignore written content
 FLAG_NAMES = ("untrusted_only", "secret_in_args", "tainted_egress")
 
 
