@@ -45,6 +45,20 @@ noulgate monitor --policy policy.json         # rates, ask approval, score drift
 noulgate serve ... --store embedded:~/.noulgate/helix && noulgate store query tainted-egress
 ```
 
+**Web console and phone.** `noulgate serve` also serves a console at `/`: the server status, the
+last 200 decisions this process made (in memory, newest first), and a form to try a call. To use it from
+a phone, start the server with a token, open `http://<host>:7701/#token=<token>` once, and use "Add to
+Home Screen". The token is required off localhost and the hook sends it from `$NOULGATE_TOKEN`:
+
+```bash
+export NOULGATE_TOKEN=$(python -c 'import secrets; print(secrets.token_urlsafe(24))')
+noulgate serve --backend rules --policy policy.json --host 0.0.0.0
+```
+
+There is no TLS, so reach it through a tunnel (Tailscale, an SSH forward); phones usually install the
+page only over HTTPS. The console shows decisions; it cannot approve an `ask`, which stays in your
+terminal.
+
 Other harnesses: `noulgate mcp-proxy -- <your stdio MCP server command>` gates any MCP client
 ([docs/mcp-clients.md](docs/mcp-clients.md)).
 

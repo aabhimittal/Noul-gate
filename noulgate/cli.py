@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -84,12 +85,22 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             "noulgate: no --policy given; using the UNCALIBRATED 0.5 threshold (no guarantee).",
             file=sys.stderr,
         )
+    token = args.token or os.environ.get("NOULGATE_TOKEN")
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not token:
+        print(
+            "noulgate: refusing to bind a non-loopback host without --token / NOULGATE_TOKEN.",
+            file=sys.stderr,
+        )
+        return 2
     store = None
     if args.store:
         from .store.helix import HelixStore
 
         store = HelixStore(args.store)
-    app = create_app(_backend(args.backend), _questions(args), policy, warmup=not args.no_warmup, store=store)
+    app = create_app(
+        _backend(args.backend), _questions(args), policy, warmup=not args.no_warmup, store=store, token=token
+    )
+    print(f"noulgate: console at http://{args.host}:{args.port}/", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
@@ -554,6 +565,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=7701)
     s.add_argument("--no-warmup", action="store_true")
+    s.add_argument(
+        "--token", help="require this bearer token (default $NOULGATE_TOKEN); needed off localhost"
+    )
     s.add_argument(
         "--store", help="also record decisions in HelixDB: memory | embedded:<dir> | http://host:6969"
     )

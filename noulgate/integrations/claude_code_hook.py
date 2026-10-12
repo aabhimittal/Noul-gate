@@ -135,9 +135,10 @@ def _output(decision: str, reason: str) -> str:
 def urllib_post(url: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
     import urllib.request  # imported here: log mode never needs it (~20 ms)
 
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
-    )
+    headers = {"Content-Type": "application/json"}
+    if token := os.environ.get("NOULGATE_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local server URL from config
         return json.loads(resp.read())
 

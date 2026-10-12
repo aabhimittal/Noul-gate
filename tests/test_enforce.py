@@ -104,3 +104,38 @@ def test_serve_endpoints():
         },
     ).json()
     assert [b["decision"] for b in batch] == ["allow", "deny"]
+
+
+def test_token_guards_api_but_not_console(monkeypatch):
+    tc = TestClient(create_app(FakeBackend(), QS, _policy(), token="s3cret"))
+    assert tc.get("/").status_code == 200 and "NOUL-GATE" in tc.get("/").text
+    assert tc.get("/manifest.webmanifest").json()["display"] == "standalone"
+    body = {"tool": "Bash", "args": {"command": "ls"}}
+    assert tc.post("/v1/decide_state", json=body).status_code == 401
+    assert tc.get("/healthz", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    ok = {"Authorization": "Bearer s3cret"}
+    d = tc.post("/v1/decide_state", json=body, headers=ok).json()
+    recent = tc.get("/v1/recent", headers=ok).json()
+    assert recent[0]["tool"] == "Bash" and recent[0]["decision"] == d["decision"]
+
+    # the hook sends $NOULGATE_TOKEN as the bearer header
+    from noulgate.integrations import claude_code_hook
+
+    seen = {}
+
+    def fake_urlopen(req, timeout):
+        seen.update(req.headers)
+        raise OSError("stop here")
+
+    monkeypatch.setenv("NOULGATE_TOKEN", "s3cret")
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(OSError):
+        claude_code_hook.urllib_post("http://gate/v1/decide", {}, 1.0)
+    assert seen["Authorization"] == "Bearer s3cret"
+
+
+def test_serve_refuses_public_bind_without_token(monkeypatch):
+    from noulgate.cli import main
+
+    monkeypatch.delenv("NOULGATE_TOKEN", raising=False)
+    assert main(["serve", "--backend", "rules", "--host", "0.0.0.0", "--no-warmup"]) == 2

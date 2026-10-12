@@ -1,13 +1,21 @@
 """`noulgate serve`: keep the decision model resident and answer gate requests over local HTTP.
 
 The Claude Code hook is a fresh process per tool call, so it cannot load a 3B model itself; in enforce
-mode it posts the hook payload here. Bind to localhost only: the API has no authentication.
+mode it posts the hook payload here. Without `token` the API has no authentication: bind to localhost.
+With `token`, every /v1 and /healthz request needs `Authorization: Bearer <token>`.
+
+`GET /` is a small web console (also installable on a phone as a PWA): live recent decisions and a
+form to try a call. The page holds no secrets; it asks for the token and sends it as the header.
 """
 
 from __future__ import annotations
 
+import hmac
 import logging
 import threading
+import time
+from collections import deque
+from importlib.resources import files
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -43,14 +51,38 @@ def create_app(
     policy: ConformalPolicy | ThresholdPolicy | None = None,
     warmup: bool = True,
     store=None,
+    token: str | None = None,
 ):
     """`store` (a store.helix.HelixStore) records every decision with its provenance and taint graph."""
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
+    from fastapi.responses import HTMLResponse, JSONResponse, Response
 
     gate = Gate(backend, questions, policy)
     builder = FeatureBuilder()
     lock = threading.Lock()  # one forward pass at a time; models are not assumed thread-safe
     app = FastAPI(title="noulgate", version="0.1.0")
+    recent: deque[dict[str, Any]] = deque(maxlen=200)  # in-memory only; the JSONL log is the record
+    web = files("noulgate") / "web"
+
+    @app.middleware("http")
+    async def auth(request: Request, call_next):
+        if token and request.url.path.startswith(("/v1/", "/healthz")):
+            sent = request.headers.get("authorization", "")
+            if not hmac.compare_digest(sent.encode(), f"Bearer {token}".encode()):
+                return JSONResponse({"detail": "bad or missing bearer token"}, status_code=401)
+        return await call_next(request)
+
+    @app.get("/", include_in_schema=False)
+    def console() -> HTMLResponse:
+        return HTMLResponse((web / "index.html").read_text())
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    def manifest() -> Response:
+        return Response((web / "manifest.webmanifest").read_text(), media_type="application/manifest+json")
+
+    @app.get("/v1/recent")
+    def recent_decisions(limit: int = 50) -> list[dict[str, Any]]:
+        return list(recent)[-limit:][::-1]
 
     if warmup:
         backend.warmup(questions)
@@ -75,6 +107,15 @@ def create_app(
         transcript_path=None,
         cwd=None,
     ) -> None:
+        recent.append(
+            {
+                "ts": time.time(),
+                "tool": tool,
+                "args": str(args)[:300],
+                "session_id": session_id,
+                **{k: result.get(k) for k in ("decision", "p_harm", "risk_class", "reason")},
+            }
+        )
         if store is None:
             return
         rec = new_record(
