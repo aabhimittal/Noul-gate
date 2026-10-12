@@ -41,6 +41,12 @@ Postgres, Redis or ad-hoc JSON files for that.
 - **Don't overclaim.** The guarantee is marginal, assumes exchangeability, and fails against adaptive
   attackers. Synthetic results are labelled SYNTHETIC. Keep the README's honest-limits section current.
 
+## Serve, console, auth
+
+`serve.py` takes an optional bearer `token` (guards `/v1/*` and `/healthz`); `noulgate serve` refuses a
+non-loopback host without one. `/` and the PWA manifest come from `noulgate/web/`. Render API data in the
+console with `textContent` only: tool args are attacker-controlled.
+
 ## Before pushing
 
 ```bash

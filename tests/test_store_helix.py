@@ -192,7 +192,7 @@ def test_serve_records_decisions_with_provenance(store):
     from noulgate.questions import load_questions
     from noulgate.serve import create_app
 
-    tc = TestClient(create_app(FakeBackend(), load_questions(), store=store))
+    tc = TestClient(create_app(FakeBackend(), load_questions(), store=store), base_url="http://localhost")
     r = tc.post(
         "/v1/decide_state",
         json={

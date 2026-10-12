@@ -15,6 +15,7 @@ from noulgate.questions import load_questions
 from noulgate.serve import create_app
 
 QS = load_questions()
+LOCAL = "http://127.0.0.1:7701"
 
 
 def _policy():
@@ -33,7 +34,7 @@ def server():
     """A `post` function that routes the hook's request into the FastAPI app in-process."""
     # p_harm = 1 - P(benign): "evil" -> 0.95 (deny), "maybe" -> 0.5 (ask), else 0.05 (allow)
     fn = lambda s: 0.05 if "evil" in str(s.args) else 0.5 if "maybe" in str(s.args) else 0.95  # noqa: E731
-    tc = TestClient(create_app(FakeBackend(fn), QS, _policy()))
+    tc = TestClient(create_app(FakeBackend(fn), QS, _policy()), base_url=LOCAL)
 
     def post(url, body, timeout):
         r = tc.post(urlsplit(url).path, json=body)
@@ -87,7 +88,7 @@ def test_bad_input_fails_to_ask(tmp_path):
 
 
 def test_serve_endpoints():
-    tc = TestClient(create_app(FakeBackend(), QS, _policy()))
+    tc = TestClient(create_app(FakeBackend(), QS, _policy()), base_url=LOCAL)
     assert tc.get("/healthz").json()["policy_kind"] == "conformal"
     r = tc.post(
         "/v1/decide_state",
@@ -104,3 +105,40 @@ def test_serve_endpoints():
         },
     ).json()
     assert [b["decision"] for b in batch] == ["allow", "deny"]
+    # no token: a DNS-rebinding page arrives with its own Host and is refused
+    assert TestClient(tc.app, base_url="http://evil.example").get("/v1/recent").status_code == 403
+
+
+def test_token_guards_api_but_not_console(monkeypatch):
+    tc = TestClient(create_app(FakeBackend(), QS, _policy(), token="s3cret"))
+    assert tc.get("/").status_code == 200 and "NOUL-GATE" in tc.get("/").text
+    assert tc.get("/manifest.webmanifest").json()["display"] == "standalone"
+    body = {"tool": "Bash", "args": {"command": "ls"}}
+    assert tc.post("/v1/decide_state", json=body).status_code == 401
+    assert tc.get("/healthz", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    ok = {"Authorization": "Bearer s3cret"}
+    d = tc.post("/v1/decide_state", json=body, headers=ok).json()
+    recent = tc.get("/v1/recent", headers=ok).json()
+    assert recent[0]["tool"] == "Bash" and recent[0]["decision"] == d["decision"]
+
+    # the hook sends $NOULGATE_TOKEN as the bearer header
+    from noulgate.integrations import claude_code_hook
+
+    seen = {}
+
+    def fake_urlopen(req, timeout):
+        seen.update(req.headers)
+        raise OSError("stop here")
+
+    monkeypatch.setenv("NOULGATE_TOKEN", "s3cret")
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(OSError):
+        claude_code_hook.urllib_post("http://gate/v1/decide", {}, 1.0)
+    assert seen["Authorization"] == "Bearer s3cret"
+
+
+def test_serve_refuses_public_bind_without_token(monkeypatch):
+    from noulgate.cli import main
+
+    monkeypatch.delenv("NOULGATE_TOKEN", raising=False)
+    assert main(["serve", "--backend", "rules", "--host", "0.0.0.0", "--no-warmup"]) == 2
