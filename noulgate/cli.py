@@ -95,10 +95,18 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     if args.approve_wait and not token:
         print("noulgate: --approve-wait grants tool permissions; it needs --token.", file=sys.stderr)
         return 2
+    approve_token = None
+    console = f"http://{args.host}:{args.port}/"
     if args.approve_wait:
+        import secrets
+
+        # never from the environment: the agent shares it and must not approve its own asks
+        approve_token = secrets.token_urlsafe(24)
+        console += f"#token={approve_token}"
         print(
             f"noulgate: asks wait {args.approve_wait:g}s for the console; give the hook --timeout"
-            f" {args.approve_wait + 5:g} or more.",
+            f" {args.approve_wait + 5:g} or more. Open the console link below on your phone; its token"
+            " can approve tool calls, so don't share it.",
             file=sys.stderr,
         )
     store = None
@@ -114,8 +122,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         store=store,
         token=token,
         approve_wait=args.approve_wait,
+        approve_token=approve_token,
     )
-    print(f"noulgate: console at http://{args.host}:{args.port}/", file=sys.stderr)
+    print(f"noulgate: console at {console}", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 

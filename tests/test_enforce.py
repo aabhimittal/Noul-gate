@@ -168,8 +168,11 @@ def test_serve_refuses_public_bind_without_token(monkeypatch):
 def _approver(approve_wait):
     """A token-guarded app where "maybe" calls come out `ask` (p_harm 0.5)."""
     fn = lambda s: 0.5 if "maybe" in str(s.args) else 0.95  # noqa: E731
-    app = create_app(FakeBackend(fn), QS, _policy(), token="t", approve_wait=approve_wait)
+    app = create_app(FakeBackend(fn), QS, _policy(), token="t", approve_wait=approve_wait, approve_token="a")
     return TestClient(app, base_url=LOCAL, headers={"Authorization": "Bearer t"})
+
+
+APPROVER = {"Authorization": "Bearer a"}
 
 
 @pytest.mark.parametrize("verdict", ["allow", "deny"])
@@ -183,17 +186,27 @@ def test_console_resolves_a_pending_ask(verdict):
     t = threading.Thread(target=lambda: out.update(tc.post("/v1/decide", json=hook).json()))
     t.start()
     for _ in range(100):
-        pending = tc.get("/v1/pending").json()
+        pending = tc.get("/v1/pending", headers=APPROVER).json()
         if pending:
             break
         time.sleep(0.02)
     assert pending[0]["tool"] == "Bash" and "event" not in pending[0]
-    assert tc.post(f"/v1/pending/{pending[0]['id']}", json={"verdict": verdict}).status_code == 200
+    assert "maybe rm -rf build" in pending[0]["args"]  # shown in full, not truncated
+    # the hook's token is in the agent's environment: it must not see or answer asks
+    assert tc.get("/v1/pending").status_code == 401
+    assert tc.post(f"/v1/pending/{pending[0]['id']}", json={"verdict": "allow"}).status_code == 401
+    assert (
+        tc.post(f"/v1/pending/{pending[0]['id']}", json={"verdict": verdict}, headers=APPROVER).status_code
+        == 200
+    )
     t.join(5)
     assert out["decision"] == verdict and out["remote"] is True
-    assert tc.get("/v1/pending").json() == []
+    assert tc.get("/v1/pending", headers=APPROVER).json() == []
     assert tc.get("/v1/recent").json()[0]["decision"] == verdict
-    assert tc.post(f"/v1/pending/{pending[0]['id']}", json={"verdict": verdict}).status_code == 404
+    assert (
+        tc.post(f"/v1/pending/{pending[0]['id']}", json={"verdict": verdict}, headers=APPROVER).status_code
+        == 404
+    )
 
 
 def test_unanswered_ask_stays_ask():
@@ -201,13 +214,17 @@ def test_unanswered_ask_stays_ask():
     hook = {"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "maybe rm -rf build"}}
     r = tc.post("/v1/decide", json=hook).json()
     assert r["decision"] == "ask" and "remote" not in r
-    assert tc.get("/v1/pending").json() == []
-    assert tc.post("/v1/pending/x", json={"verdict": "sure"}).status_code == 422
+    assert tc.get("/v1/pending", headers=APPROVER).json() == []
+    assert tc.post("/v1/pending/x", json={"verdict": "sure"}, headers=APPROVER).status_code == 422
 
 
 def test_approve_wait_needs_a_token(monkeypatch):
     with pytest.raises(ValueError):
         create_app(FakeBackend(), QS, _policy(), approve_wait=1)
+    with pytest.raises(ValueError):
+        create_app(FakeBackend(), QS, _policy(), token="t", approve_wait=1)
+    with pytest.raises(ValueError):
+        create_app(FakeBackend(), QS, _policy(), token="t", approve_token="t")
     from noulgate.cli import main
 
     monkeypatch.delenv("NOULGATE_TOKEN", raising=False)

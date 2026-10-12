@@ -12,6 +12,7 @@ form to try a call. The page holds no secrets; it asks for the token and sends i
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import threading
 import time
@@ -61,14 +62,19 @@ def create_app(
     store=None,
     token: str | None = None,
     approve_wait: float = 0.0,
+    approve_token: str | None = None,
 ):
     """`store` (a store.helix.HelixStore) records every decision with its provenance and taint graph.
 
     `approve_wait` > 0: a hook call that comes out `ask` waits up to that many seconds for an Allow/Deny
-    from the console (`/v1/pending`), then stays `ask`. It grants tool permissions, so it needs `token`.
+    from the console (`/v1/pending`), then stays `ask`. It grants tool permissions, so it needs a separate
+    `approve_token`: the hook's `token` sits in the agent's environment, and the agent must not be able to
+    approve its own asks. `/v1/pending*` accepts only `approve_token`; everything else accepts either.
     """
-    if approve_wait and not token:
-        raise ValueError("approve_wait grants tool permissions; it needs a token")
+    if approve_wait and not (token and approve_token):
+        raise ValueError("approve_wait grants tool permissions; it needs token and approve_token")
+    if approve_token and approve_token == token:
+        raise ValueError("approve_token must differ from token (the agent can read token)")
     from fastapi import FastAPI, Request
     from fastapi.responses import HTMLResponse, JSONResponse, Response
 
@@ -90,8 +96,10 @@ def create_app(
         if not token and origin is not None and urlsplit(origin).hostname not in LOOPBACK:
             return JSONResponse({"detail": "cross-site Origin; start with --token"}, status_code=403)
         if token and request.url.path.startswith(("/v1/", "/healthz")):
-            sent = request.headers.get("authorization", "")
-            if not hmac.compare_digest(sent.encode(), f"Bearer {token}".encode()):
+            sent = request.headers.get("authorization", "").encode()
+            approver = bool(approve_token) and hmac.compare_digest(sent, f"Bearer {approve_token}".encode())
+            hook = hmac.compare_digest(sent, f"Bearer {token}".encode())
+            if not (approver if request.url.path.startswith("/v1/pending") else approver or hook):
                 return JSONResponse({"detail": "bad or missing bearer token"}, status_code=401)
         return await call_next(request)
 
@@ -184,7 +192,9 @@ def create_app(
                 "id": ask_id,
                 "ts": time.time(),
                 "tool": hook.tool_name,
-                "args": str(hook.tool_input)[:300],
+                "args": json.dumps(hook.tool_input, indent=1),  # in full: you approve what you see
+                "cwd": hook.cwd,
+                "session_id": hook.session_id,
                 "reason": result.get("reason"),
                 "verdict": None,
                 "event": threading.Event(),
