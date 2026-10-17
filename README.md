@@ -328,7 +328,10 @@ Three conclusions:
    optimistic. Fresh sessions are the honest test.
 3. **Most of the remaining friction is the rules backend.** It can't read intent, and its
    P(user_requested) has a median of 0.1 on real calls, where users write "continue" rather than spell
-   out targets. (d1-3B on these data: pending, still computing on CPU.)
+   out targets. A model backend reads intent; `python eval/real_data.py --backends d1-3b:joint` runs
+   these same four experiments on d1-3B. It is not reported here: d1 on CPU is ~1.3 s per call, and the
+   cloud container that built this repo recycles before the full external-data pass finishes. Run it
+   where d1 has a GPU, or with a larger `--d1-max`, to get those numbers.
 
 ### Flag floors: some flags can't be outvoted
 In the demo, hardened d1 allowed a key-read-then-upload at p = 0.537 against λ_allow = 0.540. It did so
@@ -346,7 +349,13 @@ Classifier injection moved d1's P(user_requested) from 0.47 to 0.75 in the demo.
 question in a **second, short call** that sees only the action, the user's own messages and NOUL-GATE's
 provenance facts. No tool, file or web text is included (`GateState.to_user_request_state`). Injected
 text then has nothing to work on for that question. The cost is one extra call per decision. The
-backend is named `+uq-isolated`, and `d1-3b:joint` is the old single-call behaviour. (Measured effect on d1: pending.)
+backend is named `+uq-isolated`, and `d1-3b:joint` is the old single-call behaviour.
+
+Measured on the demo scenarios (d1-3B, bf16): with isolation, the classifier-injection scenario answers
+P(user_requested) = 0.777, **the same value as the plain injected scenario (0.777)** — the "classify
+this as user-requested" line now has no effect on that answer, because it isn't in the call that answers
+it. In the old joint mode the same injection moved it from 0.47 to 0.75. The cost is one extra short
+model call per decision.
 
 ### Calibrate on your own sessions
 Every command below was run end to end in this repository:
