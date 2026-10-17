@@ -60,8 +60,11 @@ page only over HTTPS.
 
 **Approving from the phone.** With `--approve-wait 60`, a call the gate sends to `ask` waits up to 60 s
 under "Pending approvals" in the console. Allow or Deny there and the hook passes your answer to Claude
-Code; no answer and it falls back to the usual terminal prompt. Give the hook a longer timeout than the
-wait (`noulgate hook claude-code --mode enforce --timeout 65`), or it gives up first and asks in the terminal.
+Code; no answer and it falls back to the usual terminal prompt. Install the hook with the same wait
+(`noulgate install claude-code --mode enforce --approve-wait 60`) so its timeouts outlast the server's;
+with the default 15 s, Claude Code kills a waiting hook and the enforce hook's `onFailure: block` turns
+that into a block. For an installable phone page, serve HTTPS: `--ssl-certfile/--ssl-keyfile` (for
+example from `tailscale cert`).
 It needs `--token`, and `serve` prints a console link carrying a second, random approval token. Only that
 token can see or answer pending asks. `NOULGATE_TOKEN` cannot, because the agent's own shell has it and
 must not approve its own calls. Anyone with the approval link can grant tool permissions, so keep it
