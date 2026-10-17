@@ -54,7 +54,17 @@ def _cmd_install(args: argparse.Namespace) -> int:
             extra += ["--server", args.server]
         if args.grant_allow:
             extra += ["--grant-allow"]
-    entry = None if args.uninstall else install.hook_entries(args.mode, extra, outcomes=not args.no_outcomes)
+    timeout = 15
+    if args.mode == "enforce" and args.approve_wait:
+        # Claude Code kills the hook at `timeout` and onFailure=block turns that into a block: outlast the
+        # server's wait (hook HTTP timeout +5 s, Claude Code's +10 s) so an unanswered ask falls back to `ask`
+        extra += ["--timeout", f"{args.approve_wait + 5:g}"]
+        timeout = args.approve_wait + 10
+    entry = (
+        None
+        if args.uninstall
+        else install.hook_entries(args.mode, extra, outcomes=not args.no_outcomes, timeout=timeout)
+    )
     install.install(path, entry, yes=args.yes)
     return 0
 
@@ -96,7 +106,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         print("noulgate: --approve-wait grants tool permissions; it needs --token.", file=sys.stderr)
         return 2
     approve_token = None
-    console = f"http://{args.host}:{args.port}/"
+    scheme = "https" if args.ssl_certfile else "http"
+    console = f"{scheme}://{args.host}:{args.port}/"
     if args.approve_wait:
         import secrets
 
@@ -104,9 +115,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         approve_token = secrets.token_urlsafe(24)
         console += f"#token={approve_token}"
         print(
-            f"noulgate: asks wait {args.approve_wait:g}s for the console; give the hook --timeout"
-            f" {args.approve_wait + 5:g} or more. Open the console link below on your phone; its token"
-            " can approve tool calls, so don't share it.",
+            f"noulgate: asks wait {args.approve_wait:g}s for the console; install the hook with"
+            f" `noulgate install claude-code --mode enforce --approve-wait {args.approve_wait:g}`."
+            " Open the console link below on your phone; its token can approve tool calls, so don't"
+            " share it.",
             file=sys.stderr,
         )
     store = None
@@ -125,7 +137,14 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         approve_token=approve_token,
     )
     print(f"noulgate: console at {console}", file=sys.stderr)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="warning",
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
+    )
     return 0
 
 
@@ -569,6 +588,12 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--log", help="audit log path baked into the hook command")
     i.add_argument("--server")
     i.add_argument("--grant-allow", action="store_true")
+    i.add_argument(
+        "--approve-wait",
+        type=float,
+        default=0.0,
+        help="match `serve --approve-wait`: lengthen the hook timeouts to outlast it",
+    )
     i.add_argument("--uninstall", action="store_true")
     i.add_argument(
         "--no-outcomes",
@@ -589,6 +614,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=7701)
     s.add_argument("--no-warmup", action="store_true")
+    s.add_argument("--ssl-certfile", help="serve HTTPS (phones install the console only over HTTPS)")
+    s.add_argument("--ssl-keyfile")
     s.add_argument(
         "--approve-wait",
         type=float,

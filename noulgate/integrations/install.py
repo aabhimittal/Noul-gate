@@ -21,11 +21,11 @@ def hook_command(mode: str, extra: list[str] | None = None) -> str:
     return shlex.join(parts)
 
 
-def hook_entry(mode: str, extra: list[str] | None = None) -> dict[str, Any]:
+def hook_entry(mode: str, extra: list[str] | None = None, timeout: float = 15) -> dict[str, Any]:
     entry: dict[str, Any] = {"type": "command", "command": hook_command(mode, extra)}
     if mode == "enforce":
         # A timed-out hook fails *open* by default; in enforce mode we want hook failure to block.
-        entry["timeout"] = 15
+        entry["timeout"] = timeout
         entry["onFailure"] = "block"
     else:
         entry["timeout"] = 5
@@ -49,14 +49,14 @@ EVENTS = ("PreToolUse", *OUTCOME_EVENTS)
 
 
 def hook_entries(
-    mode: str, extra: list[str] | None = None, outcomes: bool = True
+    mode: str, extra: list[str] | None = None, outcomes: bool = True, timeout: float = 15
 ) -> dict[str, dict[str, Any]]:
     """The hooks to install, per event. Outcome hooks only log (they can't block: the tool already ran),
     so they always run in log mode with a short timeout and fail open."""
-    entries = {"PreToolUse": hook_entry(mode, extra)}
+    entries = {"PreToolUse": hook_entry(mode, extra, timeout)}
     if outcomes:
         log_extra = [a for a in (extra or []) if a != "--grant-allow"]
-        log_extra = _drop_flag(log_extra, "--server")
+        log_extra = _drop_flag(_drop_flag(log_extra, "--server"), "--timeout")
         for event in OUTCOME_EVENTS:
             entries[event] = {"type": "command", "command": hook_command("log", log_extra), "timeout": 5}
     return entries

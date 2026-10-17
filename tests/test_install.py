@@ -91,3 +91,16 @@ def test_outcome_hooks_installed_and_removed(tmp_path):
     assert hooks["PreToolUse"][0]["hooks"][0]["onFailure"] == "block"
     install.install(path, None, yes=True, out=io.StringIO())
     assert json.loads(path.read_text())["hooks"] == {}
+
+
+def test_install_approve_wait_outlasts_the_server(tmp_path):
+    from noulgate.cli import main
+
+    path = tmp_path / "settings.json"
+    main(
+        ["install", "claude-code", "--settings", str(path), "--mode", "enforce", "--approve-wait", "60", "-y"]
+    )
+    hooks = json.loads(path.read_text())["hooks"]
+    pre = hooks["PreToolUse"][0]["hooks"][0]
+    assert pre["timeout"] == 70 and "--timeout 65" in pre["command"] and pre["onFailure"] == "block"
+    assert "--timeout" not in hooks["PostToolUse"][0]["hooks"][0]["command"]
