@@ -168,6 +168,7 @@ def run_enforce_mode(
     if payload.get("hook_event_name") in OUTCOME_EVENTS:
         return run_outcome(payload, log_path)
     rec = _base_record(payload, "enforce")
+    remote = False  # a person approved it in the console: emit allow so the terminal doesn't ask again
     try:
         result = post(f"{server.rstrip('/')}/v1/decide", payload, timeout)
         decision = result["decision"]
@@ -176,12 +177,13 @@ def run_enforce_mode(
         for key in ("p_harm", "risk_class", "answers", "backend", "policy_id"):
             rec[key] = result.get(key)
         reason = result.get("reason") or f"NOUL-GATE {decision}"
+        remote = decision == "allow" and result.get("remote") is True
     except (OSError, KeyError, ValueError, TypeError) as exc:  # URLError is an OSError
         decision = "ask"
         reason = f"NOUL-GATE decision server unavailable ({type(exc).__name__}); asking you instead."
         rec["error"] = str(exc)[:500]
     rec.update(decision=decision, reason=reason, latency_ms=(time.perf_counter() - t0) * 1000)
-    if decision == "allow" and not grant_allow:
+    if decision == "allow" and not (grant_allow or remote):
         rec["emitted"], out = "none", ""
     else:
         rec["emitted"], out = decision, _output(decision, reason)

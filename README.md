@@ -56,8 +56,16 @@ noulgate serve --backend rules --policy policy.json --host 0.0.0.0
 ```
 
 There is no TLS, so reach it through a tunnel (Tailscale, an SSH forward); phones usually install the
-page only over HTTPS. The console shows decisions; it cannot approve an `ask`, which stays in your
-terminal.
+page only over HTTPS.
+
+**Approving from the phone.** With `--approve-wait 60`, a call the gate sends to `ask` waits up to 60 s
+under "Pending approvals" in the console. Allow or Deny there and the hook passes your answer to Claude
+Code; no answer and it falls back to the usual terminal prompt. Give the hook a longer timeout than the
+wait (`noulgate hook claude-code --mode enforce --timeout 65`), or it gives up first and asks in the terminal.
+It needs `--token`, and `serve` prints a console link carrying a second, random approval token. Only that
+token can see or answer pending asks. `NOULGATE_TOKEN` cannot, because the agent's own shell has it and
+must not approve its own calls. Anyone with the approval link can grant tool permissions, so keep it
+private. Pending asks show the full arguments, the working directory and the session.
 
 Without a token the server answers only requests addressed to `127.0.0.1`, `localhost` or `::1`, and
 refuses any browser request whose `Origin` is another site. That blocks DNS-rebinding reads and
